@@ -7,8 +7,14 @@ export default function Home() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [events, setEvents] = useState([]);
-  const [latencyHistory, setLatencyHistory] = useState([]); // NEW: for chart
+  const [latencyHistory, setLatencyHistory] = useState([]);
   const logRef = useRef(null);
+
+  // NEW: Chat state
+  const [chatInput, setChatInput] = useState("");
+  const [chatResponse, setChatResponse] = useState(null);
+  const [chatLoading, setChatLoading] = useState(false);
+  const [lastRoutedTo, setLastRoutedTo] = useState(null);
 
   // Fetch health data
   const fetchHealth = async () => {
@@ -20,7 +26,6 @@ export default function Home() {
 
       const timestamp = new Date(result.checkedAt).toLocaleTimeString();
 
-      // Event log entries
       const newEvents = [
         {
           id: Date.now() + "-anthropic",
@@ -42,14 +47,12 @@ export default function Home() {
 
       setEvents((prev) => [...newEvents, ...prev].slice(0, 50));
 
-      // NEW: Latency data point for the chart
       const newLatencyPoint = {
         time: timestamp,
         openai: result.openai?.latency || 0,
         anthropic: result.anthropic?.latency || 0,
       };
 
-      // Add newest at beginning, keep last 30 points
       setLatencyHistory((prev) => [newLatencyPoint, ...prev].slice(0, 30));
 
     } catch (error) {
@@ -58,49 +61,117 @@ export default function Home() {
     }
   };
 
-  useEffect(() => {
-    fetchHealth();
-  }, []);
+  // NEW: Send chat message
+  const sendChat = async () => {
+    if (!chatInput.trim()) return;
+    setChatLoading(true);
+    setChatResponse(null);
 
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: chatInput }),
+      });
+      const result = await response.json();
+
+      if (result.error) {
+        setChatResponse({ error: result.error });
+      } else {
+        setChatResponse(result);
+        setLastRoutedTo(result.routedTo);
+
+        // Add failover event to log
+        const timestamp = new Date().toLocaleTimeString();
+        if (result.routedTo === "anthropic" && data?.openai?.status === "DOWN") {
+          const failoverEvent = {
+            id: Date.now() + "-failover",
+            time: timestamp,
+            api: "ROUTER",
+            status: "FAILOVER",
+            latency: null,
+            note: `OpenAI DOWN → Routed to Anthropic`,
+          };
+          setEvents((prev) => [failoverEvent, ...prev].slice(0, 50));
+        }
+      }
+    } catch (error) {
+      setChatResponse({ error: error.message });
+    }
+
+    setChatLoading(false);
+  };
+
+  // NEW: Simulate outage
+  const simulateOutage = async (api, action) => {
+    try {
+      const response = await fetch("/api/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api, action }),
+      });
+      const result = await response.json();
+
+      if (result.success) {
+        // Add event to log
+        const timestamp = new Date().toLocaleTimeString();
+        const event = {
+          id: Date.now() + "-sim",
+          time: timestamp,
+          api: api === "openai" ? "OpenAI" : "Anthropic",
+          status: action === "down" ? "DOWN" : "UP",
+          latency: null,
+          note: action === "down" ? "Simulated outage" : "Restored",
+        };
+        setEvents((prev) => [event, ...prev].slice(0, 50));
+
+        // Immediately refresh health data
+        fetchHealth();
+      }
+    } catch (error) {
+      console.error("Simulate error:", error);
+    }
+  };
+
+  useEffect(() => { fetchHealth(); }, []);
   useEffect(() => {
     const interval = setInterval(fetchHealth, 10000);
     return () => clearInterval(interval);
   }, []);
-
   useEffect(() => {
-    if (logRef.current) {
-      logRef.current.scrollTop = 0;
-    }
+    if (logRef.current) logRef.current.scrollTop = 0;
   }, [events]);
 
   // Status helpers
   const getStatusColor = (status) => {
     if (status === "UP") return "bg-emerald-500";
     if (status === "DOWN") return "bg-red-500";
+    if (status === "FAILOVER") return "bg-amber-500";
     return "bg-zinc-600";
   };
 
   const getStatusTextColor = (status) => {
     if (status === "UP") return "text-emerald-400";
     if (status === "DOWN") return "text-red-400";
+    if (status === "FAILOVER") return "text-amber-400";
     return "text-zinc-500";
   };
 
   const getApiColor = (api) => {
     if (api === "OpenAI") return "text-emerald-400";
     if (api === "Anthropic") return "text-violet-400";
+    if (api === "ROUTER") return "text-amber-400";
     return "text-zinc-400";
   };
 
   // Stats
-  const failovers = events.filter((e) => e.status === "DOWN").length;
+  const failovers = events.filter((e) => e.status === "DOWN" || e.status === "FAILOVER").length;
   const allUp = data?.openai?.status === "UP" && data?.anthropic?.status === "UP";
   const uptime = allUp ? "100%" : "50%";
 
-  // NEW: Reverse latency history for chart (oldest on left, newest on right)
+  // Chart data
   const chartData = [...latencyHistory].reverse();
 
-  // NEW: Custom tooltip for chart
   const CustomTooltip = ({ active, payload, label }) => {
     if (active && payload && payload.length) {
       return (
@@ -169,16 +240,18 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Two Column Layout */}
+        {/* Three Column Layout */}
         <div className="grid grid-cols-5 gap-6 mb-8">
-          {/* Left: API Cards */}
+          {/* Left: API Cards + Controls */}
           <div className="col-span-2 space-y-4">
             <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">
               Monitored APIs
             </h2>
 
             {/* OpenAI Card */}
-            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+            <div className={`bg-zinc-900 border rounded-xl p-6 ${
+              data?.openai?.status === "DOWN" ? "border-red-500/30" : "border-zinc-800"
+            }`}>
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center">
@@ -210,7 +283,9 @@ export default function Home() {
             </div>
 
             {/* Anthropic Card */}
-            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+            <div className={`bg-zinc-900 border rounded-xl p-6 ${
+              data?.anthropic?.status === "DOWN" ? "border-red-500/30" : "border-zinc-800"
+            }`}>
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-lg bg-violet-500/10 flex items-center justify-center">
@@ -241,6 +316,43 @@ export default function Home() {
               </div>
             </div>
 
+            {/* NEW: Simulate Outage Controls */}
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+              <h3 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-4">
+                ⚡ Simulate Outage (Demo)
+              </h3>
+              <div className="space-y-3">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => simulateOutage("openai", "down")}
+                    className="flex-1 text-xs font-medium px-3 py-2 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors"
+                  >
+                    Kill OpenAI
+                  </button>
+                  <button
+                    onClick={() => simulateOutage("openai", "up")}
+                    className="flex-1 text-xs font-medium px-3 py-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors"
+                  >
+                    Restore OpenAI
+                  </button>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => simulateOutage("anthropic", "down")}
+                    className="flex-1 text-xs font-medium px-3 py-2 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors"
+                  >
+                    Kill Anthropic
+                  </button>
+                  <button
+                    onClick={() => simulateOutage("anthropic", "up")}
+                    className="flex-1 text-xs font-medium px-3 py-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors"
+                  >
+                    Restore Anthropic
+                  </button>
+                </div>
+              </div>
+            </div>
+
             <div className="text-center text-xs text-zinc-600">
               {data?.checkedAt
                 ? `Last checked: ${new Date(data.checkedAt).toLocaleTimeString()}`
@@ -259,7 +371,7 @@ export default function Home() {
 
             <div
               ref={logRef}
-              className="bg-zinc-900 border border-zinc-800 rounded-xl h-[420px] overflow-y-auto"
+              className="bg-zinc-900 border border-zinc-800 rounded-xl h-[500px] overflow-y-auto"
             >
               {events.length === 0 ? (
                 <div className="flex items-center justify-center h-full text-zinc-600 text-sm">
@@ -282,6 +394,9 @@ export default function Home() {
                         <span className={`text-sm font-medium ${getApiColor(event.api)}`}>
                           {event.api}
                         </span>
+                        {event.note && (
+                          <span className="text-xs text-zinc-600">— {event.note}</span>
+                        )}
                       </div>
                       <div className="flex items-center gap-4">
                         {event.latency ? (
@@ -295,6 +410,8 @@ export default function Home() {
                           className={`text-xs font-medium px-2 py-0.5 rounded ${
                             event.status === "UP"
                               ? "bg-emerald-500/10 text-emerald-400"
+                              : event.status === "FAILOVER"
+                              ? "bg-amber-500/10 text-amber-400"
                               : "bg-red-500/10 text-red-400"
                           }`}
                         >
@@ -309,8 +426,65 @@ export default function Home() {
           </div>
         </div>
 
-        {/* NEW: Latency Chart Section */}
-        <div>
+        {/* NEW: Test Chat Section */}
+        <div className="mb-8">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">
+              Test Router — Send a Message
+            </h2>
+            {lastRoutedTo && (
+              <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                lastRoutedTo === "openai"
+                  ? "bg-emerald-500/10 text-emerald-400"
+                  : "bg-violet-500/10 text-violet-400"
+              }`}>
+                Routed to: {lastRoutedTo === "openai" ? "OpenAI" : "Anthropic"}
+              </span>
+            )}
+          </div>
+
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+            <div className="flex gap-3 mb-4">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && sendChat()}
+                placeholder="Type a message to test the router..."
+                className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-cyan-500/50"
+              />
+              <button
+                onClick={sendChat}
+                disabled={chatLoading || !chatInput.trim()}
+                className="px-6 py-3 rounded-lg bg-gradient-to-r from-cyan-500 to-violet-500 text-black font-semibold text-sm hover:shadow-[0_0_20px_rgba(34,211,238,0.3)] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {chatLoading ? "Sending..." : "Send"}
+              </button>
+            </div>
+
+            {chatResponse && (
+              <div className={`p-4 rounded-lg text-sm ${
+                chatResponse.error
+                  ? "bg-red-500/10 border border-red-500/20 text-red-400"
+                  : "bg-zinc-800 border border-zinc-700 text-zinc-300"
+              }`}>
+                {chatResponse.error ? (
+                  <span>⚠️ {chatResponse.error}</span>
+                ) : (
+                  <div>
+                    <div className="text-xs text-zinc-500 mb-2">
+                      Routed to <span className={chatResponse.routedTo === "openai" ? "text-emerald-400" : "text-violet-400"}>{chatResponse.routedTo === "openai" ? "OpenAI" : "Anthropic"}</span> at {new Date(chatResponse.routedAt).toLocaleTimeString()}
+                    </div>
+                    <p>{chatResponse.message}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Latency Chart */}
+        <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">
               Latency Over Time
@@ -330,7 +504,7 @@ export default function Home() {
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
             {chartData.length < 2 ? (
               <div className="h-[250px] flex items-center justify-center text-zinc-600 text-sm">
-                Collecting data... (need at least 2 checks to show chart)
+                Collecting data...
               </div>
             ) : (
               <ResponsiveContainer width="100%" height={250}>
@@ -345,38 +519,18 @@ export default function Home() {
                     tick={{ fill: "#52525b", fontSize: 11 }}
                     axisLine={{ stroke: "#27272a" }}
                     tickLine={false}
-                    label={{
-                      value: "ms",
-                      angle: -90,
-                      position: "insideLeft",
-                      fill: "#52525b",
-                      fontSize: 11,
-                    }}
+                    label={{ value: "ms", angle: -90, position: "insideLeft", fill: "#52525b", fontSize: 11 }}
                   />
                   <Tooltip content={<CustomTooltip />} />
-                  <Line
-                    type="monotone"
-                    dataKey="openai"
-                    stroke="#10b981"
-                    strokeWidth={2}
-                    dot={false}
-                    activeDot={{ r: 4, fill: "#10b981" }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="anthropic"
-                    stroke="#a78bfa"
-                    strokeWidth={2}
-                    dot={false}
-                    activeDot={{ r: 4, fill: "#a78bfa" }}
-                  />
+                  <Line type="monotone" dataKey="openai" stroke="#10b981" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: "#10b981" }} />
+                  <Line type="monotone" dataKey="anthropic" stroke="#a78bfa" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: "#a78bfa" }} />
                 </LineChart>
               </ResponsiveContainer>
             )}
           </div>
         </div>
 
-        {/* Debug Panel */}
+        {/* Debug */}
         <details className="mt-8">
           <summary className="text-xs text-zinc-600 cursor-pointer hover:text-zinc-400">
             Debug: Raw API Response
