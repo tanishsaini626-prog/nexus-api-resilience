@@ -1,12 +1,14 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
 export default function Home() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [events, setEvents] = useState([]); // NEW: stores all past checks
-  const logRef = useRef(null); // NEW: reference to scroll to bottom
+  const [events, setEvents] = useState([]);
+  const [latencyHistory, setLatencyHistory] = useState([]); // NEW: for chart
+  const logRef = useRef(null);
 
   // Fetch health data
   const fetchHealth = async () => {
@@ -16,9 +18,9 @@ export default function Home() {
       setData(result);
       setLoading(false);
 
-      // NEW: Create event entries for this check
       const timestamp = new Date(result.checkedAt).toLocaleTimeString();
 
+      // Event log entries
       const newEvents = [
         {
           id: Date.now() + "-anthropic",
@@ -38,11 +40,17 @@ export default function Home() {
         },
       ];
 
-      // NEW: Add to the BEGINNING of the list (newest first)
-      setEvents((prev) => [...newEvents, ...prev]);
+      setEvents((prev) => [...newEvents, ...prev].slice(0, 50));
 
-      // NEW: Keep only last 50 events (don't let it grow forever)
-      setEvents((prev) => prev.slice(0, 50));
+      // NEW: Latency data point for the chart
+      const newLatencyPoint = {
+        time: timestamp,
+        openai: result.openai?.latency || 0,
+        anthropic: result.anthropic?.latency || 0,
+      };
+
+      // Add newest at beginning, keep last 30 points
+      setLatencyHistory((prev) => [newLatencyPoint, ...prev].slice(0, 30));
 
     } catch (error) {
       console.error("Failed to fetch health:", error);
@@ -50,25 +58,22 @@ export default function Home() {
     }
   };
 
-  // Run once on mount
   useEffect(() => {
     fetchHealth();
   }, []);
 
-  // Run every 10 seconds
   useEffect(() => {
     const interval = setInterval(fetchHealth, 10000);
     return () => clearInterval(interval);
   }, []);
 
-  // NEW: Auto-scroll to top when new events arrive
   useEffect(() => {
     if (logRef.current) {
       logRef.current.scrollTop = 0;
     }
   }, [events]);
 
-  // Status colors
+  // Status helpers
   const getStatusColor = (status) => {
     if (status === "UP") return "bg-emerald-500";
     if (status === "DOWN") return "bg-red-500";
@@ -87,10 +92,27 @@ export default function Home() {
     return "text-zinc-400";
   };
 
-  // Calculate stats
+  // Stats
   const failovers = events.filter((e) => e.status === "DOWN").length;
   const allUp = data?.openai?.status === "UP" && data?.anthropic?.status === "UP";
   const uptime = allUp ? "100%" : "50%";
+
+  // NEW: Reverse latency history for chart (oldest on left, newest on right)
+  const chartData = [...latencyHistory].reverse();
+
+  // NEW: Custom tooltip for chart
+  const CustomTooltip = ({ active, payload, label }) => {
+    if (active && payload && payload.length) {
+      return (
+        <div className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs">
+          <p className="text-zinc-400 mb-1">{label}</p>
+          <p className="text-emerald-400">OpenAI: {payload[0]?.value}ms</p>
+          <p className="text-violet-400">Anthropic: {payload[1]?.value}ms</p>
+        </div>
+      );
+    }
+    return null;
+  };
 
   return (
     <main className="min-h-screen bg-[#09090b] text-white">
@@ -148,8 +170,8 @@ export default function Home() {
         </div>
 
         {/* Two Column Layout */}
-        <div className="grid grid-cols-5 gap-6">
-          {/* Left: API Cards (takes 2 columns) */}
+        <div className="grid grid-cols-5 gap-6 mb-8">
+          {/* Left: API Cards */}
           <div className="col-span-2 space-y-4">
             <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">
               Monitored APIs
@@ -219,7 +241,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Last Checked */}
             <div className="text-center text-xs text-zinc-600">
               {data?.checkedAt
                 ? `Last checked: ${new Date(data.checkedAt).toLocaleTimeString()}`
@@ -227,7 +248,7 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Right: Event Log (takes 3 columns) */}
+          {/* Right: Event Log */}
           <div className="col-span-3">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">
@@ -251,7 +272,6 @@ export default function Home() {
                       key={event.id}
                       className="flex items-center justify-between px-4 py-3 hover:bg-zinc-800/30 transition-colors"
                     >
-                      {/* Left: Time + API Name */}
                       <div className="flex items-center gap-3">
                         <span className="text-xs text-zinc-600 font-mono w-16">
                           {event.time}
@@ -263,8 +283,6 @@ export default function Home() {
                           {event.api}
                         </span>
                       </div>
-
-                      {/* Right: Status + Latency */}
                       <div className="flex items-center gap-4">
                         {event.latency ? (
                           <span className="text-xs text-zinc-500 w-16 text-right">
@@ -288,6 +306,73 @@ export default function Home() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+
+        {/* NEW: Latency Chart Section */}
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">
+              Latency Over Time
+            </h2>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-1.5">
+                <div className="w-3 h-0.5 bg-emerald-500 rounded"></div>
+                <span className="text-xs text-zinc-500">OpenAI</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="w-3 h-0.5 bg-violet-500 rounded"></div>
+                <span className="text-xs text-zinc-500">Anthropic</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+            {chartData.length < 2 ? (
+              <div className="h-[250px] flex items-center justify-center text-zinc-600 text-sm">
+                Collecting data... (need at least 2 checks to show chart)
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={250}>
+                <LineChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                  <XAxis
+                    dataKey="time"
+                    tick={{ fill: "#52525b", fontSize: 11 }}
+                    axisLine={{ stroke: "#27272a" }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tick={{ fill: "#52525b", fontSize: 11 }}
+                    axisLine={{ stroke: "#27272a" }}
+                    tickLine={false}
+                    label={{
+                      value: "ms",
+                      angle: -90,
+                      position: "insideLeft",
+                      fill: "#52525b",
+                      fontSize: 11,
+                    }}
+                  />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Line
+                    type="monotone"
+                    dataKey="openai"
+                    stroke="#10b981"
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{ r: 4, fill: "#10b981" }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="anthropic"
+                    stroke="#a78bfa"
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{ r: 4, fill: "#a78bfa" }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
