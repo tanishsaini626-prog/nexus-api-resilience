@@ -14,7 +14,7 @@ export async function POST(request) {
 
     let routedTo = null;
     let response = null;
-
+ 
     if (openaiStatus === "UP") {
       routedTo = "openai";
       response = await callOpenAI(userMessage);
