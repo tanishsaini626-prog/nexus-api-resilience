@@ -1,108 +1,48 @@
-import { updateHealthCheck, getApiState, getStatusCounts, getConfig } from "../../lib/state";
+import { updateHealthCheck, getApiState, getStatusCounts, getConfig, getCircuitBreakerSummary } from "../../lib/state";
 
 export async function GET() {
-  const startTime = Date.now();
-  const state = getApiState();
-  const config = getConfig();
-  const results = {};
-
-  // ============================================
-  // CHECK OPENAI
-  // ============================================
   try {
-    const openaiStart = Date.now();
-    const response = await fetch("https://api.openai.com/", {
-      method: "GET",
-      signal: AbortSignal.timeout(5000),
-    });
-    const latency = Date.now() - openaiStart;
+    const results = {};
 
-    // Only update if NOT simulated
-    if (!state.openai.simulatedDown && !state.openai.simulatedDegraded) {
-      updateHealthCheck("openai", {
-        latency: latency,
-        statusCode: response.status,
-        wasError: false,
-      });
+    // Check OpenAI
+    try {
+      const start = Date.now();
+      const res = await fetch("https://api.openai.com/", { method: "GET", signal: AbortSignal.timeout(5000) });
+      const latency = Date.now() - start;
+      if (!getApiState().openai.simulatedDown && !getApiState().openai.simulatedDegraded) {
+        updateHealthCheck("openai", { latency, statusCode: res.status, wasError: false });
+      }
+      results.openai = { status: getApiState().openai.status, latency, statusCode: res.status };
+    } catch (e) {
+      if (!getApiState().openai.simulatedDown && !getApiState().openai.simulatedDegraded) {
+        updateHealthCheck("openai", { latency: null, statusCode: null, wasError: true });
+      }
+      results.openai = { status: getApiState().openai.status, latency: null };
     }
 
-    results.openai = {
-      status: state.openai.status,
-      latency: latency,
-      statusCode: response.status,
-      wasError: false,
-    };
+    // Check Anthropic
+    try {
+      const start = Date.now();
+      const res = await fetch("https://api.anthropic.com/", { method: "GET", signal: AbortSignal.timeout(5000) });
+      const latency = Date.now() - start;
+      if (!getApiState().anthropic.simulatedDown && !getApiState().anthropic.simulatedDegraded) {
+        updateHealthCheck("anthropic", { latency, statusCode: res.status, wasError: false });
+      }
+      results.anthropic = { status: getApiState().anthropic.status, latency, statusCode: res.status };
+    } catch (e) {
+      if (!getApiState().anthropic.simulatedDown && !getApiState().anthropic.simulatedDegraded) {
+        updateHealthCheck("anthropic", { latency: null, statusCode: null, wasError: true });
+      }
+      results.anthropic = { status: getApiState().anthropic.status, latency: null };
+    }
+
+    results.checkedAt = new Date().toISOString();
+    results.statusCounts = getStatusCounts();
+    results.config = { degradedThreshold: getConfig().degradedThreshold + "ms" };
+    results.circuitBreaker = getCircuitBreakerSummary();
+
+    return Response.json(results);
   } catch (error) {
-    if (!state.openai.simulatedDown && !state.openai.simulatedDegraded) {
-      updateHealthCheck("openai", {
-        latency: null,
-        statusCode: null,
-        wasError: true,
-      });
-    }
-
-    results.openai = {
-      status: state.openai.status,
-      latency: null,
-      statusCode: null,
-      wasError: true,
-      error: error.message,
-    };
+    return Response.json({ error: error.message, checkedAt: new Date().toISOString() });
   }
-
-  // ============================================
-  // CHECK ANTHROPIC
-  // ============================================
-  try {
-    const anthropicStart = Date.now();
-    const response = await fetch("https://api.anthropic.com/", {
-      method: "GET",
-      signal: AbortSignal.timeout(5000),
-    });
-    const latency = Date.now() - anthropicStart;
-
-    if (!state.anthropic.simulatedDown && !state.anthropic.simulatedDegraded) {
-      updateHealthCheck("anthropic", {
-        latency: latency,
-        statusCode: response.status,
-        wasError: false,
-      });
-    }
-
-    results.anthropic = {
-      status: state.anthropic.status,
-      latency: latency,
-      statusCode: response.status,
-      wasError: false,
-    };
-  } catch (error) {
-    if (!state.anthropic.simulatedDown && !state.anthropic.simulatedDegraded) {
-      updateHealthCheck("anthropic", {
-        latency: null,
-        statusCode: null,
-        wasError: true,
-      });
-    }
-
-    results.anthropic = {
-      status: state.anthropic.status,
-      latency: null,
-      statusCode: null,
-      wasError: true,
-      error: error.message,
-    };
-  }
-
-  // ============================================
-  // METADATA
-  // ============================================
-  const counts = getStatusCounts();
-  results.checkedAt = new Date().toISOString();
-  results.totalTime = Date.now() - startTime;
-  results.config = {
-    degradedThreshold: config.degradedThreshold + "ms",
-  };
-  results.statusCounts = counts;
-
-  return Response.json(results);
 }
