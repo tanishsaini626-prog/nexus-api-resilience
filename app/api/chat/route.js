@@ -14,16 +14,31 @@ export async function POST(request) {
 
     let routedTo = null;
     let response = null;
- 
-    if (openaiStatus === "UP") {
+    let usedDegraded = false; // Track if we used a degraded API
+
+    // ============================================
+    // ROUTING LOGIC (updated for three-state)
+    // ============================================
+    // HEALTHY → Use it (preferred)
+    // DEGRADED → Use it (it's slow but not dead)
+    // DOWN → Skip it, try fallback
+    
+    if (openaiStatus !== "DOWN") {
       routedTo = "openai";
+      if (openaiStatus === "DEGRADED") usedDegraded = true;
       response = await callOpenAI(userMessage);
-    } else if (anthropicStatus === "UP") {
+    } else if (anthropicStatus !== "DOWN") {
       routedTo = "anthropic";
+      if (anthropicStatus === "DEGRADED") usedDegraded = true;
       response = await callAnthropic(userMessage);
     } else {
       return Response.json(
-        { error: "All APIs are currently down", openaiStatus, anthropicStatus },
+        {
+          error: "All APIs are currently down",
+          openaiStatus,
+          anthropicStatus,
+          suggestion: "Enable fallback chain or wait for recovery"
+        },
         { status: 503 }
       );
     }
@@ -32,6 +47,8 @@ export async function POST(request) {
       message: response,
       routedTo: routedTo,
       routedAt: new Date().toISOString(),
+      usedDegraded: usedDegraded, // New field
+      apiStatus: routedTo === "openai" ? openaiStatus : anthropicStatus, // New field
     });
 
   } catch (error) {

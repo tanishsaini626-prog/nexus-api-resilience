@@ -1,4 +1,4 @@
-import { simulateOutage, restoreApi, getApiState } from "../../lib/state";
+import { simulateOutage, simulateDegraded, restoreApi, getApiState } from "../../lib/state";
 
 export async function POST(request) {
   try {
@@ -9,20 +9,33 @@ export async function POST(request) {
       return Response.json({ error: "api and action are required" }, { status: 400 });
     }
 
+    // Handle three actions: down, degraded, up
     if (action === "down") {
       simulateOutage(api);
+    } else if (action === "degraded") {
+      simulateDegraded(api);
     } else if (action === "up") {
       restoreApi(api);
     } else {
-      return Response.json({ error: "action must be down or up" }, { status: 400 });
+      return Response.json(
+        { error: "action must be 'down', 'degraded', or 'up'" },
+        { status: 400 }
+      );
     }
 
     const state = getApiState();
 
     return Response.json({
       success: true,
-      message: action === "down" ? api + " marked as DOWN" : api + " restored to UP",
-      state: { openai: state.openai.status, anthropic: state.anthropic.status },
+      message: {
+        down: api + " marked as DOWN",
+        degraded: api + " marked as DEGRADED",
+        up: api + " restored to HEALTHY",
+      }[action],
+      state: {
+        openai: state.openai.status,
+        anthropic: state.anthropic.status,
+      },
       timestamp: new Date().toISOString(),
     });
 
