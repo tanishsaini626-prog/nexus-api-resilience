@@ -152,3 +152,33 @@ export function getCircuitBreakerSummary() {
     config: { failureThreshold: 3, cooldownDuration: 30000 },
   };
 }
+// ============================================
+// RETRY CONFIG (Day 9)
+// ============================================
+
+const retryConfig = {
+  maxRetries: 3,           // Max retry attempts before giving up
+  baseDelay: 1000,         // 1 second base delay
+  maxDelay: 10000,         // Cap at 10 seconds
+  jitter: true,            // Add randomness to prevent thundering herd
+};
+
+export function getRetryConfig() {
+  return retryConfig;
+}
+
+// Calculate delay for a given attempt number (0-indexed)
+export function getRetryDelay(attempt) {
+  let delay = retryConfig.baseDelay * Math.pow(2, attempt);
+  
+  // Cap at maxDelay
+  delay = Math.min(delay, retryConfig.maxDelay);
+  
+  // Add jitter (±20% randomness) to prevent all retries hitting at once
+  if (retryConfig.jitter) {
+    const jitter = delay * 0.2;
+    delay = delay + (Math.random() * jitter * 2 - jitter);
+  }
+  
+  return Math.round(delay);
+}
