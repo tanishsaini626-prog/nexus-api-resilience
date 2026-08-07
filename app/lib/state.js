@@ -1,3 +1,5 @@
+let optimizationMode = "OFF"; // "OFF" | "COST" | "LATENCY"
+
 let apiState = {
   openai: {
     status: "HEALTHY",
@@ -40,6 +42,23 @@ let apiState = {
 export function getApiState() {
   return apiState;
 }
+
+export function getOptimizationMode() {
+  return optimizationMode;
+}
+
+export function setOptimizationMode(mode) {
+  if (["OFF", "COST", "LATENCY"].includes(mode)) {
+    optimizationMode = mode;
+  }
+}
+
+// Relative token costs
+export const API_COSTS = {
+  gemini: 1, // Cheapest
+  anthropic: 3,
+  openai: 5, // Most expensive
+};
 
 export function getConfig() {
   return { degradedThreshold: 500 };

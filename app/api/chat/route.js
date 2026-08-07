@@ -1,4 +1,4 @@
-import { getEffectiveStatus, isRequestAllowed, recordRequestResult, getApiState, getRetryConfig, getRetryDelay, checkRateLimit, shouldDebounce, generateIncidentId } from "../../lib/state";
+import { getEffectiveStatus, isRequestAllowed, recordRequestResult, getApiState, getRetryConfig, getRetryDelay, checkRateLimit, shouldDebounce, generateIncidentId, getOptimizationMode, API_COSTS } from "../../lib/state";
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -35,131 +35,80 @@ export async function POST(request) {
 
     // Try OpenAI with retries
     const openaiStatus = getEffectiveStatus("openai");
-    const openaiCircuit = isRequestAllowed("openai");
+    // Optimizer Agent Routing Logic
+    const optimizationMode = getOptimizationMode();
+    let providers = ["openai", "anthropic", "gemini"];
+    const state = getApiState();
 
-    if (openaiStatus !== "DOWN" && openaiCircuit.allowed) {
-      for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
-        try {
-          // EDGE CASE: Request timeout (don't wait forever)
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second hard timeout
-          
-          response = await callOpenAI(body.message, controller.signal);
-          clearTimeout(timeoutId);
-          recordRequestResult("openai", true);
-          
-          if (attempt > 0) {
-            retryLog.push({ attempt: attempt + 1, api: "openai", success: true, delay: getRetryDelay(attempt - 1) + "ms" });
-          }
-          routedTo = "openai";
-          break;
-        } catch (error) {
-          clearTimeout(timeoutId); // Clear timeout if we failed before it
-          
-          const failResult = recordRequestResult("openai", false);
-          if (failResult.transitioned) {
-            circuitReason = "Circuit " + failResult.from + " → " + failResult.to;
-          }
-          if (error.name === "AbortError") {
-            retryLog.push({ attempt: attempt + 1, api: "openai", success: false, delay: "10000ms", error: "Request timeout (10s)" });
-          } else {
-            retryLog.push({ attempt: attempt + 1, api: "openai", success: false, delay: getRetryDelay(attempt) + "ms", error: error.message });
-          }
-
-          if (attempt < config.maxRetries) {
-            const delay = getRetryDelay(attempt);
-            await sleep(delay);
-          } else {
-            retryLog.push({ attempt: "exhausted", api: "openai", success: false, error: "Max retries reached" });
-            routedTo = null;
-            break;
-          }
-        }
-      }
-    } else if (!openaiCircuit.allowed) {
-      circuitReason = "OpenAI circuit " + openaiCircuit.reason;
+    if (optimizationMode === "COST") {
+      providers.sort((a, b) => API_COSTS[a] - API_COSTS[b]);
+    } else if (optimizationMode === "LATENCY") {
+      providers.sort((a, b) => (state[a].latency || 9999) - (state[b].latency || 9999));
     }
+    
+    console.log("ROUTER DEBUG: mode=", optimizationMode, "providers=", providers);
 
-    // Try Anthropic with retries
-    if (!routedTo) {
-      const anthropicStatus = getEffectiveStatus("anthropic");
-      const anthropicCircuit = isRequestAllowed("anthropic");
+    const callFn = {
+      openai: callOpenAI,
+      anthropic: callAnthropic,
+      gemini: callGemini
+    };
 
-      if (anthropicStatus !== "DOWN" && anthropicCircuit.allowed) {
-        if (!circuitReason) circuitReason = "OpenAI failed, using Anthropic";
+    for (const api of providers) {
+      if (routedTo) break;
+
+      const apiStatus = getEffectiveStatus(api);
+      const circuit = isRequestAllowed(api);
+
+      if (apiStatus !== "DOWN" && circuit.allowed) {
+        if (!circuitReason && api !== providers[0]) {
+          circuitReason = "Primary failed, using " + api;
+        }
 
         for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
           try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000);
             
-            response = await callAnthropic(body.message, controller.signal);
+            response = await callFn[api](body.message, controller.signal);
             clearTimeout(timeoutId);
-            recordRequestResult("anthropic", true);
+            recordRequestResult(api, true);
             
             if (attempt > 0) {
-              retryLog.push({ attempt: attempt + 1, api: "anthropic", success: true, delay: getRetryDelay(attempt - 1) + "ms" });
+              retryLog.push({ attempt: attempt + 1, api, success: true, delay: getRetryDelay(attempt - 1) + "ms" });
             }
-            routedTo = "anthropic";
+            routedTo = api;
             break;
           } catch (error) {
             clearTimeout(timeoutId);
-            recordRequestResult("anthropic", false);
+            
+            const failResult = recordRequestResult(api, false);
+            if (failResult.transitioned && !circuitReason) {
+              circuitReason = "Circuit " + failResult.from + " → " + failResult.to;
+            }
+            
+            if (error.name === "AbortError") {
+              retryLog.push({ attempt: attempt + 1, api, success: false, delay: "10000ms", error: "Request timeout (10s)" });
+            } else {
+              retryLog.push({ attempt: attempt + 1, api, success: false, delay: getRetryDelay(attempt) + "ms", error: error.message });
+            }
+
             if (attempt < config.maxRetries) {
               const delay = getRetryDelay(attempt);
-              retryLog.push({ attempt: attempt + 1, api: "anthropic", success: false, delay: delay + "ms", error: error.message });
               await sleep(delay);
             } else {
-              retryLog.push({ attempt: "exhausted", api: "anthropic", success: false, error: "Max retries reached" });
-              routedTo = null;
+              retryLog.push({ attempt: "exhausted", api, success: false, error: "Max retries reached" });
               break;
             }
           }
         }
-      } else if (!circuitReason) {
-        circuitReason = "OpenAI & Anthropic blocked";
+      } else if (!circuit.allowed && !circuitReason) {
+        circuitReason = api + " circuit " + circuit.reason;
       }
     }
 
-    // Try Gemini with retries
-    if (!routedTo) {
-      const geminiStatus = getEffectiveStatus("gemini");
-      const geminiCircuit = isRequestAllowed("gemini");
-
-      if (geminiStatus !== "DOWN" && geminiCircuit.allowed) {
-        if (!circuitReason) circuitReason = "OpenAI & Anthropic failed, using Gemini";
-
-        for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
-          try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
-            
-            response = await callGemini(body.message, controller.signal);
-            clearTimeout(timeoutId);
-            recordRequestResult("gemini", true);
-            
-            if (attempt > 0) {
-              retryLog.push({ attempt: attempt + 1, api: "gemini", success: true, delay: getRetryDelay(attempt - 1) + "ms" });
-            }
-            routedTo = "gemini";
-            break;
-          } catch (error) {
-            clearTimeout(timeoutId);
-            recordRequestResult("gemini", false);
-            if (attempt < config.maxRetries) {
-              const delay = getRetryDelay(attempt);
-              retryLog.push({ attempt: attempt + 1, api: "gemini", success: false, delay: delay + "ms", error: error.message });
-              await sleep(delay);
-            } else {
-              retryLog.push({ attempt: "exhausted", api: "gemini", success: false, error: "Max retries reached" });
-              routedTo = null;
-              break;
-            }
-          }
-        }
-      } else if (!circuitReason) {
-        circuitReason = "All circuits blocked";
-      }
+    if (!routedTo && !circuitReason) {
+      circuitReason = "All circuits blocked or APIs down";
     }
 
     // EDGE CASE: All APIs failed
@@ -174,7 +123,6 @@ export async function POST(request) {
       }, { status: 503 });
     }
 
-    const state = getApiState();
     return Response.json({
       message: response,
       routedTo,

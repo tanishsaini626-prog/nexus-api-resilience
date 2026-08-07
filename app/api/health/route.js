@@ -1,4 +1,4 @@
-import { updateHealthCheck, getApiState, getStatusCounts, getConfig, getCircuitBreakerSummary, setLastKnownHealth, getLastKnownHealth, checkFlapping } from "../../lib/state";
+import { updateHealthCheck, getApiState, getStatusCounts, getConfig, getCircuitBreakerSummary, setLastKnownHealth, getLastKnownHealth, checkFlapping, getOptimizationMode } from "../../lib/state";
 
 export async function GET() {
   try {
@@ -90,6 +90,7 @@ export async function GET() {
 
     results.checkedAt = new Date().toISOString();
     results.statusCounts = getStatusCounts();
+    results.optimizationMode = getOptimizationMode();
     results.config = { degradedThreshold: getConfig().degradedThreshold + "ms" };
     results.circuitBreaker = getCircuitBreakerSummary();
 
