@@ -35,6 +35,7 @@ export async function POST(request) {
       state: {
         openai: state.openai.status,
         anthropic: state.anthropic.status,
+        gemini: state.gemini.status,
       },
       timestamp: new Date().toISOString(),
     });

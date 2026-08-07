@@ -60,6 +60,34 @@ export async function GET() {
       results.anthropic = { status: getApiState().anthropic.status, latency: null, flapping: anthropicFlapping };
     }
 
+    // Check Gemini
+    let geminiFlapping = false;
+    try {
+      const start = Date.now();
+      const res = await fetch("https://generativelanguage.googleapis.com/", { method: "GET", signal: AbortSignal.timeout(5000) });
+      const latency = Date.now() - start;
+      
+      if (!getApiState().gemini.simulatedDown && !getApiState().gemini.simulatedDegraded) {
+        const oldStatus = getApiState().gemini.status;
+        const flapping = checkFlapping("gemini", oldStatus, "HEALTHY");
+        geminiFlapping = flapping.isFlapping;
+        if (!flapping.isFlapping) {
+          updateHealthCheck("gemini", { latency, statusCode: res.status, wasError: false });
+        }
+      }
+      results.gemini = { status: getApiState().gemini.status, latency, statusCode: res.status, flapping: geminiFlapping };
+    } catch (e) {
+      if (!getApiState().gemini.simulatedDown && !getApiState().gemini.simulatedDegraded) {
+        const oldStatus = getApiState().gemini.status;
+        const flapping = checkFlapping("gemini", oldStatus, "DOWN");
+        geminiFlapping = flapping.isFlapping;
+        if (!flapping.isFlapping) {
+          updateHealthCheck("gemini", { latency: null, statusCode: null, wasError: true });
+        }
+      }
+      results.gemini = { status: getApiState().gemini.status, latency: null, flapping: geminiFlapping };
+    }
+
     results.checkedAt = new Date().toISOString();
     results.statusCounts = getStatusCounts();
     results.config = { degradedThreshold: getConfig().degradedThreshold + "ms" };

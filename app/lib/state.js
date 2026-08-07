@@ -23,6 +23,18 @@ let apiState = {
     circuitOpenedAt: null,
     totalCircuitOpens: 0,
   },
+  gemini: {
+    status: "HEALTHY",
+    latency: 0,
+    statusCode: null,
+    simulatedDown: false,
+    simulatedDegraded: false,
+    lastStatusChange: null,
+    circuitState: "CLOSED",
+    consecutiveFailures: 0,
+    circuitOpenedAt: null,
+    totalCircuitOpens: 0,
+  },
 };
 
 export function getApiState() {
@@ -126,7 +138,7 @@ export function recordRequestResult(apiName, success) {
 
 export function getStatusCounts() {
   let healthy = 0, degraded = 0, down = 0;
-  for (const api of ["openai", "anthropic"]) {
+  for (const api of ["openai", "anthropic", "gemini"]) {
     const s = apiState[api].status;
     if (s === "HEALTHY") healthy++;
     else if (s === "DEGRADED") degraded++;
@@ -148,6 +160,12 @@ export function getCircuitBreakerSummary() {
       failures: apiState.anthropic.consecutiveFailures,
       threshold: 3,
       totalOpens: apiState.anthropic.totalCircuitOpens,
+    },
+    gemini: {
+      state: apiState.gemini.circuitState,
+      failures: apiState.gemini.consecutiveFailures,
+      threshold: 3,
+      totalOpens: apiState.gemini.totalCircuitOpens,
     },
     config: { failureThreshold: 3, cooldownDuration: 30000 },
   };
@@ -198,6 +216,7 @@ export function generateIncidentId() {
 const flappingState = {
   openai: { transitions: 0, lastTransitionTime: null, locked: false, lockedUntil: null },
   anthropic: { transitions: 0, lastTransitionTime: null, locked: false, lockedUntil: null },
+  gemini: { transitions: 0, lastTransitionTime: null, locked: false, lockedUntil: null },
 };
 
 const FLAPPING_CONFIG = {

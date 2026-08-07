@@ -36,6 +36,15 @@ export default function Home() {
 
       const newEvents = [
         {
+          id: Date.now() + "-gemini",
+          time: timestamp,
+          api: "Gemini",
+          status: result.gemini?.status,
+          latency: result.gemini?.latency,
+          circuitState: result.circuitBreaker?.gemini?.state,
+          flapping: result.gemini?.flapping,
+        },
+        {
           id: Date.now() + "-anthropic",
           time: timestamp,
           api: "Anthropic",
@@ -61,6 +70,7 @@ export default function Home() {
         time: timestamp,
         openai: result.openai?.latency || 0,
         anthropic: result.anthropic?.latency || 0,
+        gemini: result.gemini?.latency || 0,
       };
 
       setLatencyHistory((prev) => [newLatencyPoint, ...prev].slice(0, 30));
@@ -160,7 +170,7 @@ export default function Home() {
         const event = {
           id: Date.now() + "-sim",
           time: timestamp,
-          api: api === "openai" ? "OpenAI" : "Anthropic",
+          api: api === "openai" ? "OpenAI" : api === "anthropic" ? "Anthropic" : "Gemini",
           status: statusMap[action] || "UNKNOWN",
           note: noteMap[action] || action,
         };
@@ -216,6 +226,7 @@ export default function Home() {
   const getApiColor = (api) => {
     if (api === "OpenAI") return "text-emerald-400";
     if (api === "Anthropic") return "text-violet-400";
+    if (api === "Gemini") return "text-blue-400";
     if (api === "ROUTER") return "text-cyan-400";
     return "text-zinc-400";
   };
@@ -257,6 +268,7 @@ export default function Home() {
           <p className="text-zinc-400 mb-1.5 font-medium">{label}</p>
           <p className="text-emerald-400">OpenAI: {payload[0]?.value}ms</p>
           <p className="text-violet-400">Anthropic: {payload[1]?.value}ms</p>
+          <p className="text-blue-400">Gemini: {payload[2]?.value}ms</p>
           <div className="border-t border-zinc-700 mt-1.5 pt-1.5">
             <p className="text-zinc-500">Threshold: {data?.config?.degradedThreshold || "500ms"}</p>
           </div>
@@ -420,6 +432,37 @@ export default function Home() {
               </div>
             </div>
 
+            {/* Gemini Card */}
+            <div className={`bg-zinc-900/50 border rounded-xl p-5 transition-all duration-300 ${getCardBorder(data?.gemini?.status)}`}>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-3">
+                  <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${getIconStyle(data?.gemini?.status, "blue").bg}`}>
+                    <span className={`text-xs font-bold ${getIconStyle(data?.gemini?.status, "blue").text}`}>GE</span>
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold">Google Gemini</div>
+                    <div className="text-[10px] text-zinc-600">Gemini API</div>
+                  </div>
+                </div>
+                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${getStatusBg(data?.gemini?.status)}`}>
+                  {loading ? "..." : data?.gemini?.status || "..."}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-zinc-600 mb-2">
+                <span>Latency</span>
+                <span className="font-mono tabular-nums">{loading ? "—" : data?.gemini?.latency ? `${data.gemini.latency}ms` : "—"}</span>
+              </div>
+              <div className={`flex items-center justify-between text-[10px] rounded-lg px-2.5 py-2 ${getCircuitBg(cb?.gemini?.state)}`}>
+                <span className="text-zinc-500">Circuit</span>
+                <div className="flex items-center gap-1.5">
+                  <div className={`w-1.5 h-1.5 rounded-full ${getCircuitColor(cb?.gemini?.state)}`}></div>
+                  <span className={`font-medium ${getCircuitTextColor(cb?.gemini?.state)}`}>
+                    {cb?.gemini?.state || "CLOSED"}
+                  </span>
+                </div>
+              </div>
+            </div>
+
             {/* Simulate */}
             <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl p-5">
               <div className="flex items-center gap-2 mb-3">
@@ -442,6 +485,14 @@ export default function Home() {
                   <button onClick={() => simulateApi("anthropic", "down")} className="flex-1 text-[10px] font-medium px-2 py-1.5 rounded-lg bg-red-500/5 text-red-400/60 border border-red-500/10 hover:bg-red-500/10 hover:text-red-400 transition-all">Kill</button>
                   <button onClick={() => simulateApi("anthropic", "degraded")} className="flex-1 text-[10px] font-medium px-2 py-1.5 rounded-lg bg-amber-500/5 text-amber-400/60 border border-amber-500/10 hover:bg-amber-500/10 hover:text-amber-400 transition-all">Slow</button>
                   <button onClick={() => simulateApi("anthropic", "up")} className="flex-1 text-[10px] font-medium px-2 py-1.5 rounded-lg bg-emerald-500/5 text-emerald-400/60 border border-emerald-500/10 hover:bg-emerald-500/10 hover:text-emerald-400 transition-all">Fix</button>
+                </div>
+                <div className="flex items-center gap-1.5 mb-1 mt-3">
+                  <span className="text-[10px] text-blue-400/60 w-14">Gemini</span>
+                </div>
+                <div className="flex gap-1.5">
+                  <button onClick={() => simulateApi("gemini", "down")} className="flex-1 text-[10px] font-medium px-2 py-1.5 rounded-lg bg-red-500/5 text-red-400/60 border border-red-500/10 hover:bg-red-500/10 hover:text-red-400 transition-all">Kill</button>
+                  <button onClick={() => simulateApi("gemini", "degraded")} className="flex-1 text-[10px] font-medium px-2 py-1.5 rounded-lg bg-amber-500/5 text-amber-400/60 border border-amber-500/10 hover:bg-amber-500/10 hover:text-amber-400 transition-all">Slow</button>
+                  <button onClick={() => simulateApi("gemini", "up")} className="flex-1 text-[10px] font-medium px-2 py-1.5 rounded-lg bg-emerald-500/5 text-emerald-400/60 border border-emerald-500/10 hover:bg-emerald-500/10 hover:text-emerald-400 transition-all">Fix</button>
                 </div>
               </div>
             </div>
@@ -487,7 +538,7 @@ export default function Home() {
           <div className="flex items-center gap-2 mb-2">
             <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Test Router</h2>
             <div className="flex-1 h-px bg-zinc-800/50"></div>
-            {lastRoutedTo && <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${lastRoutedTo === "openai" ? "bg-emerald-500/10 text-emerald-400" : "bg-violet-500/10 text-violet-400"}`}>{lastRoutedTo === "openai" ? "OpenAI" : "Anthropic"}</span>}
+            {lastRoutedTo && <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${lastRoutedTo === "openai" ? "bg-emerald-500/10 text-emerald-400" : lastRoutedTo === "anthropic" ? "bg-violet-500/10 text-violet-400" : "bg-blue-500/10 text-blue-400"}`}>{lastRoutedTo === "openai" ? "OpenAI" : lastRoutedTo === "anthropic" ? "Anthropic" : "Gemini"}</span>}
           </div>
 
           {/* Rate limit indicator */}
@@ -502,8 +553,8 @@ export default function Home() {
               <div className="border-b border-zinc-800/50 p-4 max-h-48 overflow-y-auto space-y-2">
                 {chatHistory.map((msg, i) => (
                   <div key={i} className="flex gap-2">
-                    <span className={`text-[10px] font-mono mt-0.5 w-14 flex-shrink-0 ${msg.role === "user" ? "text-cyan-400" : msg.role === "error" ? "text-red-400" : "text-violet-400"}`}>
-                      {msg.role === "user" ? "you" : msg.role === "error" ? "error" : msg.routedTo === "openai" ? "openai" : "anthro"}
+                    <span className={`text-[10px] font-mono mt-0.5 w-14 flex-shrink-0 ${msg.role === "user" ? "text-cyan-400" : msg.role === "error" ? "text-red-400" : msg.routedTo === "openai" ? "text-emerald-400" : msg.routedTo === "anthropic" ? "text-violet-400" : "text-blue-400"}`}>
+                      {msg.role === "user" ? "you" : msg.role === "error" ? "error" : msg.routedTo === "openai" ? "openai" : msg.routedTo === "anthropic" ? "anthro" : "gemini"}
                     </span>
                     <div className="flex-1">
                       <span className={`text-xs ${msg.role === "error" ? "text-red-400" : "text-zinc-400"}`}>{msg.text}</span>
@@ -546,6 +597,7 @@ export default function Home() {
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-1.5"><div className="w-3 h-0.5 bg-emerald-500 rounded"></div><span className="text-[10px] text-zinc-600">OpenAI</span></div>
               <div className="flex items-center gap-1.5"><div className="w-3 h-0.5 bg-violet-500 rounded"></div><span className="text-[10px] text-zinc-600">Anthropic</span></div>
+              <div className="flex items-center gap-1.5"><div className="w-3 h-0.5 bg-blue-500 rounded"></div><span className="text-[10px] text-zinc-600">Gemini</span></div>
             </div>
           </div>
           <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl p-5">
@@ -557,10 +609,12 @@ export default function Home() {
                   <defs>
                     <linearGradient id="openaiGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#10b981" stopOpacity={0.2} /><stop offset="100%" stopColor="#10b981" stopOpacity={0} /></linearGradient>
                     <linearGradient id="anthropicGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#a78bfa" stopOpacity={0.2} /><stop offset="100%" stopColor="#a78bfa" stopOpacity={0} /></linearGradient>
+                    <linearGradient id="geminiGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#60a5fa" stopOpacity={0.2} /><stop offset="100%" stopColor="#60a5fa" stopOpacity={0} /></linearGradient>
                   </defs>
                   <XAxis dataKey="time" tick={{ fill: "#3f3f46", fontSize: 10 }} axisLine={false} tickLine={false} dy={8} />
                   <YAxis tick={{ fill: "#3f3f46", fontSize: 10 }} axisLine={false} tickLine={false} dx={-5} tickFormatter={(v) => `${v}ms`} />
                   <Tooltip content={<CustomTooltip />} />
+                  <Area type="monotone" dataKey="gemini" stroke="#60a5fa" strokeWidth={1.5} fill="url(#geminiGrad)" dot={false} activeDot={{ r: 3, fill: "#60a5fa" }} />
                   <Area type="monotone" dataKey="anthropic" stroke="#a78bfa" strokeWidth={1.5} fill="url(#anthropicGrad)" dot={false} activeDot={{ r: 3, fill: "#a78bfa" }} />
                   <Area type="monotone" dataKey="openai" stroke="#10b981" strokeWidth={1.5} fill="url(#openaiGrad)" dot={false} activeDot={{ r: 3, fill: "#10b981" }} />
                 </AreaChart>

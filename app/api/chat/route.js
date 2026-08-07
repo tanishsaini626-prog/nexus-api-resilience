@@ -117,7 +117,48 @@ export async function POST(request) {
           }
         }
       } else if (!circuitReason) {
-        circuitReason = "Both circuits blocked";
+        circuitReason = "OpenAI & Anthropic blocked";
+      }
+    }
+
+    // Try Gemini with retries
+    if (!routedTo) {
+      const geminiStatus = getEffectiveStatus("gemini");
+      const geminiCircuit = isRequestAllowed("gemini");
+
+      if (geminiStatus !== "DOWN" && geminiCircuit.allowed) {
+        if (!circuitReason) circuitReason = "OpenAI & Anthropic failed, using Gemini";
+
+        for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            
+            response = await callGemini(body.message, controller.signal);
+            clearTimeout(timeoutId);
+            recordRequestResult("gemini", true);
+            
+            if (attempt > 0) {
+              retryLog.push({ attempt: attempt + 1, api: "gemini", success: true, delay: getRetryDelay(attempt - 1) + "ms" });
+            }
+            routedTo = "gemini";
+            break;
+          } catch (error) {
+            clearTimeout(timeoutId);
+            recordRequestResult("gemini", false);
+            if (attempt < config.maxRetries) {
+              const delay = getRetryDelay(attempt);
+              retryLog.push({ attempt: attempt + 1, api: "gemini", success: false, delay: delay + "ms", error: error.message });
+              await sleep(delay);
+            } else {
+              retryLog.push({ attempt: "exhausted", api: "gemini", success: false, error: "Max retries reached" });
+              routedTo = null;
+              break;
+            }
+          }
+        }
+      } else if (!circuitReason) {
+        circuitReason = "All circuits blocked";
       }
     }
 
@@ -165,4 +206,11 @@ async function callAnthropic(msg, signal) {
   if (signal?.aborted) throw new Error("Request timeout");
   await sleep(200);
   return "[Anthropic Claude] Received: \"" + msg + "\"";
+}
+
+async function callGemini(msg, signal) {
+  if (getApiState().gemini.status === "DOWN") throw new Error("API is down");
+  if (signal?.aborted) throw new Error("Request timeout");
+  await sleep(180);
+  return "[Google Gemini] Received: \"" + msg + "\"";
 }
