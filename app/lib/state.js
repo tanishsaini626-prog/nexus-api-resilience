@@ -182,3 +182,110 @@ export function getRetryDelay(attempt) {
   
   return Math.round(delay);
 }
+// ============================================
+// EDGE CASE DATA (Day 10)
+// ============================================
+
+// Incident counter for unique error IDs
+let incidentCounter = 1;
+
+export function generateIncidentId() {
+  const id = incidentCounter++;
+  return "INC-2025-" + String(id).padStart(4, "0");
+}
+
+// Flapping detection (rapid UP/DOWN transitions)
+const flappingState = {
+  openai: { transitions: 0, lastTransitionTime: null, locked: false, lockedUntil: null },
+  anthropic: { transitions: 0, lastTransitionTime: null, locked: false, lockedUntil: null },
+};
+
+const FLAPPING_CONFIG = {
+  maxTransitions: 5,       // Max state changes in window
+  windowMs: 60000,        // 1 minute window
+  lockDurationMs: 120000,  // Lock state for 2 minutes if flapping
+};
+
+export function checkFlapping(apiName, oldStatus, newStatus) {
+  if (oldStatus === newStatus) return { isFlapping: false, locked: false };
+
+  const flapping = flappingState[apiName];
+  const now = Date.now();
+
+  // If locked, don't change status
+  if (flapping.locked) {
+    if (now > flapping.lockedUntil) {
+      // Unlock after lock duration
+      flapping.locked = false;
+      flapping.transitions = 0;
+      flapping.lastTransitionTime = null;
+      return { isFlapping: false, locked: false, justUnlocked: true };
+    }
+    return { isFlapping: true, locked: true };
+  }
+
+  // Reset window if too much time has passed
+  if (flapping.lastTransitionTime && (now - flapping.lastTransitionTime > FLAPPING_CONFIG.windowMs)) {
+    flapping.transitions = 0;
+    flapping.lastTransitionTime = null;
+  }
+
+  // Record this transition
+  flapping.transitions++;
+  flapping.lastTransitionTime = now;
+
+  // Check if flapping
+  if (flapping.transitions >= FLAPPING_CONFIG.maxTransitions) {
+    flapping.locked = true;
+    flapping.lockedUntil = now + FLAPPING_CONFIG.lockDurationMs;
+    return { isFlapping: true, locked: true };
+  }
+
+  return { isFlapping: false, locked: false };
+}
+
+// Rate limiting for chat
+const rateLimitState = {
+  timestamps: [],
+  maxPerMinute: 20,
+};
+
+export function checkRateLimit() {
+  const now = Date.now();
+  // Remove timestamps older than 1 minute
+  rateLimitState.timestamps = rateLimitState.timestamps.filter((t) => now - t < 60000);
+
+  if (rateLimitState.timestamps.length >= rateLimitState.maxPerMinute) {
+    return { allowed: false, remaining: 0, resetIn: 60000 - (now - rateLimitState.timestamps[0]) };
+  }
+
+  rateLimitState.timestamps.push(now);
+  return { allowed: true, remaining: rateLimitState.maxPerMinute - rateLimitState.timestamps.length };
+}
+
+// Last known health state (for crash recovery)
+let lastKnownHealth = null;
+
+export function setLastKnownHealth(data) {
+  lastKnownHealth = { ...data, savedAt: new Date().toISOString() };
+}
+
+export function getLastKnownHealth() {
+  return lastKnownHealth;
+}
+
+// Debounce tracker
+const debounceState = { lastSendTime: 0, minInterval: 500 };
+
+export function shouldDebounce() {
+  const now = Date.now();
+  if (now - debounceState.lastSendTime < debounceState.minInterval) {
+    return { shouldWait: true, waitMs: debounceState.minInterval - (now - debounceState.lastSendTime) };
+  }
+  debounceState.lastSendTime = now;
+  return { shouldWait: false, waitMs: 0 };
+}
+
+export function resetDebounce() {
+  debounceState.lastSendTime = 0;
+}

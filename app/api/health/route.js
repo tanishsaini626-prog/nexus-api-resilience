@@ -1,39 +1,63 @@
-import { updateHealthCheck, getApiState, getStatusCounts, getConfig, getCircuitBreakerSummary } from "../../lib/state";
+import { updateHealthCheck, getApiState, getStatusCounts, getConfig, getCircuitBreakerSummary, setLastKnownHealth, getLastKnownHealth, checkFlapping } from "../../lib/state";
 
 export async function GET() {
   try {
     const results = {};
 
     // Check OpenAI
+    let openaiFlapping = false;
     try {
       const start = Date.now();
       const res = await fetch("https://api.openai.com/", { method: "GET", signal: AbortSignal.timeout(5000) });
       const latency = Date.now() - start;
+      
       if (!getApiState().openai.simulatedDown && !getApiState().openai.simulatedDegraded) {
-        updateHealthCheck("openai", { latency, statusCode: res.status, wasError: false });
+        const oldStatus = getApiState().openai.status;
+        const flapping = checkFlapping("openai", oldStatus, "HEALTHY");
+        openaiFlapping = flapping.isFlapping;
+        if (!flapping.isFlapping) {
+          updateHealthCheck("openai", { latency, statusCode: res.status, wasError: false });
+        }
       }
-      results.openai = { status: getApiState().openai.status, latency, statusCode: res.status };
+      results.openai = { status: getApiState().openai.status, latency, statusCode: res.status, flapping: openaiFlapping };
     } catch (e) {
       if (!getApiState().openai.simulatedDown && !getApiState().openai.simulatedDegraded) {
-        updateHealthCheck("openai", { latency: null, statusCode: null, wasError: true });
+        const oldStatus = getApiState().openai.status;
+        const flapping = checkFlapping("openai", oldStatus, "DOWN");
+        openaiFlapping = flapping.isFlapping;
+        if (!flapping.isFlapping) {
+          updateHealthCheck("openai", { latency: null, statusCode: null, wasError: true });
+        }
       }
-      results.openai = { status: getApiState().openai.status, latency: null };
+      results.openai = { status: getApiState().openai.status, latency: null, flapping: openaiFlapping };
     }
 
     // Check Anthropic
+    let anthropicFlapping = false;
     try {
       const start = Date.now();
       const res = await fetch("https://api.anthropic.com/", { method: "GET", signal: AbortSignal.timeout(5000) });
       const latency = Date.now() - start;
+      
       if (!getApiState().anthropic.simulatedDown && !getApiState().anthropic.simulatedDegraded) {
-        updateHealthCheck("anthropic", { latency, statusCode: res.status, wasError: false });
+        const oldStatus = getApiState().anthropic.status;
+        const flapping = checkFlapping("anthropic", oldStatus, "HEALTHY");
+        anthropicFlapping = flapping.isFlapping;
+        if (!flapping.isFlapping) {
+          updateHealthCheck("anthropic", { latency, statusCode: res.status, wasError: false });
+        }
       }
-      results.anthropic = { status: getApiState().anthropic.status, latency, statusCode: res.status };
+      results.anthropic = { status: getApiState().anthropic.status, latency, statusCode: res.status, flapping: anthropicFlapping };
     } catch (e) {
       if (!getApiState().anthropic.simulatedDown && !getApiState().anthropic.simulatedDegraded) {
-        updateHealthCheck("anthropic", { latency: null, statusCode: null, wasError: true });
+        const oldStatus = getApiState().anthropic.status;
+        const flapping = checkFlapping("anthropic", oldStatus, "DOWN");
+        anthropicFlapping = flapping.isFlapping;
+        if (!flapping.isFlapping) {
+          updateHealthCheck("anthropic", { latency: null, statusCode: null, wasError: true });
+        }
       }
-      results.anthropic = { status: getApiState().anthropic.status, latency: null };
+      results.anthropic = { status: getApiState().anthropic.status, latency: null, flapping: anthropicFlapping };
     }
 
     results.checkedAt = new Date().toISOString();
@@ -41,8 +65,28 @@ export async function GET() {
     results.config = { degradedThreshold: getConfig().degradedThreshold + "ms" };
     results.circuitBreaker = getCircuitBreakerSummary();
 
+    // Save for crash recovery
+    setLastKnownHealth(results);
+
     return Response.json(results);
+
   } catch (error) {
-    return Response.json({ error: error.message, checkedAt: new Date().toISOString() });
+    // If EVERYTHING crashes, return last known good state
+    const lastKnown = getLastKnownHealth();
+    if (lastKnown) {
+      return Response.json({
+        ...lastKnown,
+        degraded: true,
+        note: "Health check failed, showing last known state",
+        error: error.message,
+        checkedAt: new Date().toISOString(),
+      });
+    }
+    return Response.json({
+      error: "Health check failed",
+      message: error.message,
+      incidentId: "INC-" + Date.now().toString(36).slice(-6),
+      checkedAt: new Date().toISOString(),
+    });
   }
 }
