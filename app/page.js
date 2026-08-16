@@ -224,10 +224,19 @@ export default function Home() {
     }
   };
 
-  useEffect(() => { fetchHealth(); }, []);
   useEffect(() => {
-    const interval = setInterval(fetchHealth, 10000);
-    return () => clearInterval(interval);
+    let ignore = false;
+    async function load() {
+      if (!ignore) {
+        await fetchHealth();
+      }
+    }
+    load();
+    const interval = setInterval(load, 10000);
+    return () => {
+      ignore = true;
+      clearInterval(interval);
+    };
   }, []);
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = 0;
