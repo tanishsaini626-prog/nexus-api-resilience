@@ -118,11 +118,29 @@ export function getEffectiveStatus(api) {
   return apiState[api].status;
 }
 
+// How long an OPEN circuit waits before allowing a single test request through
+// (the OPEN -> HALF_OPEN transition). Shared with getCircuitBreakerSummary()
+// below so the reported config always matches the value actually enforced.
+const CIRCUIT_BREAKER_COOLDOWN_MS = 30000;
+
 export function isRequestAllowed(apiName) {
   const api = apiState[apiName];
+
   if (api.circuitState === "CLOSED") return { allowed: true, reason: "CLOSED" };
-  if (api.circuitState === "OPEN") return { allowed: false, reason: "OPEN" };
+
+  if (api.circuitState === "OPEN") {
+    const elapsed = Date.now() - api.circuitOpenedAt;
+    if (elapsed >= CIRCUIT_BREAKER_COOLDOWN_MS) {
+      // Cooldown has elapsed: let one request through as a recovery probe.
+      api.circuitState = "HALF_OPEN";
+      api.lastStatusChange = new Date().toISOString();
+      return { allowed: true, reason: "HALF_OPEN_TEST" };
+    }
+    return { allowed: false, reason: "OPEN", retryAfterMs: CIRCUIT_BREAKER_COOLDOWN_MS - elapsed };
+  }
+
   if (api.circuitState === "HALF_OPEN") return { allowed: true, reason: "HALF_OPEN_TEST" };
+
   return { allowed: false, reason: "UNKNOWN" };
 }
 
@@ -186,7 +204,7 @@ export function getCircuitBreakerSummary() {
       threshold: 3,
       totalOpens: apiState.gemini.totalCircuitOpens,
     },
-    config: { failureThreshold: 3, cooldownDuration: 30000 },
+    config: { failureThreshold: 3, cooldownDuration: CIRCUIT_BREAKER_COOLDOWN_MS },
   };
 }
 // ============================================
