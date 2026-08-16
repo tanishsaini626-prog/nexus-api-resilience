@@ -121,7 +121,9 @@ export default function Home() {
   const sendChat = async () => {
     if (!chatInput.trim()) return;
 
-    // EDGE CASE: Debounce
+    // setChatLoading(true) disables the Send button while a request is in flight,
+    // which is a client-side submit-guard — the real debounce protection now lives
+    // server-side in /api/chat.
     setChatLoading(true);
     const userMsg = chatInput;
     setChatHistory((prev) => [...prev, { role: "user", text: userMsg }]);
@@ -137,14 +139,16 @@ export default function Home() {
 
       if (result.error) {
         let errorText = result.error;
-        let incidentId = null;
-        let retryAfter = null;
+        let incidentId = result.incidentId || null;
+        let retryAfter = result.retryAfter ? result.retryAfter * 1000 : null;
         try {
           const parsed = JSON.parse(errorText);
           if (parsed.incidentId) incidentId = parsed.incidentId;
           if (parsed.retryAfter) retryAfter = parsed.retryAfter;
         } catch (e) {
-          incidentId = "INT-" + Date.now().toString(36).slice(-6);
+          if (!incidentId) {
+            incidentId = "INT-" + Date.now().toString(36).slice(-6);
+          }
         }
         setChatHistory((prev) => [...prev, { role: "error", text: errorText, incidentId, retryAfter }]);
       } else {

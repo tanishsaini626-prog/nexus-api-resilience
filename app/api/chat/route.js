@@ -14,6 +14,16 @@ export async function POST(request) {
       }, { status: 429 });
     }
 
+    // EDGE CASE: Debounce check
+    const debounceCheck = shouldDebounce();
+    if (debounceCheck.shouldWait) {
+      return Response.json({
+        error: "Please slow down and wait a moment before sending another message",
+        incidentId: generateIncidentId(),
+        retryAfter: Math.ceil(debounceCheck.waitMs / 1000) || 1,
+      }, { status: 429 });
+    }
+
     const body = await request.json();
     
     // EDGE CASE: Input validation
