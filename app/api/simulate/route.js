@@ -9,6 +9,13 @@ export async function POST(request) {
       return Response.json({ error: "api and action are required" }, { status: 400 });
     }
 
+    if (!["openai", "anthropic", "gemini"].includes(api)) {
+      return Response.json(
+        { error: "api must be 'openai', 'anthropic', or 'gemini'" },
+        { status: 400 }
+      );
+    }
+
     // Handle three actions: down, degraded, up
     if (action === "down") {
       simulateOutage(api);
