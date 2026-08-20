@@ -1,5 +1,7 @@
 import { getEffectiveStatus, isRequestAllowed, recordRequestResult, getApiState, getRetryConfig, getRetryDelay, checkRateLimit, shouldDebounce, generateIncidentId, getOptimizationMode, API_COSTS } from "../../lib/state";
 
+const CHAT_REQUEST_TIMEOUT_MS = 10000;
+
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 export async function POST(request) {
@@ -55,8 +57,6 @@ export async function POST(request) {
     } else if (optimizationMode === "LATENCY") {
       providers.sort((a, b) => (state[a].latency || 9999) - (state[b].latency || 9999));
     }
-    
-    console.log("ROUTER DEBUG: mode=", optimizationMode, "providers=", providers);
 
     const callFn = {
       openai: callOpenAI,
@@ -78,7 +78,7 @@ export async function POST(request) {
         for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
           try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            const timeoutId = setTimeout(() => controller.abort(), CHAT_REQUEST_TIMEOUT_MS);
             
             response = await callFn[api](body.message, controller.signal);
             clearTimeout(timeoutId);

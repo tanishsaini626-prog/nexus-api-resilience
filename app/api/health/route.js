@@ -1,5 +1,7 @@
 import { updateHealthCheck, getApiState, getStatusCounts, getConfig, getCircuitBreakerSummary, setLastKnownHealth, getLastKnownHealth, checkFlapping, getOptimizationMode } from "../../lib/state";
 
+const HEALTH_CHECK_TIMEOUT_MS = 5000;
+
 export async function GET() {
   try {
     const results = {};
@@ -8,7 +10,7 @@ export async function GET() {
     let openaiFlapping = false;
     try {
       const start = Date.now();
-      const res = await fetch("https://api.openai.com/", { method: "GET", signal: AbortSignal.timeout(5000) });
+      const res = await fetch("https://api.openai.com/", { method: "GET", signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS) });
       const latency = Date.now() - start;
       
       if (!getApiState().openai.simulatedDown && !getApiState().openai.simulatedDegraded) {
@@ -36,7 +38,7 @@ export async function GET() {
     let anthropicFlapping = false;
     try {
       const start = Date.now();
-      const res = await fetch("https://api.anthropic.com/", { method: "GET", signal: AbortSignal.timeout(5000) });
+      const res = await fetch("https://api.anthropic.com/", { method: "GET", signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS) });
       const latency = Date.now() - start;
       
       if (!getApiState().anthropic.simulatedDown && !getApiState().anthropic.simulatedDegraded) {
@@ -64,7 +66,7 @@ export async function GET() {
     let geminiFlapping = false;
     try {
       const start = Date.now();
-      const res = await fetch("https://generativelanguage.googleapis.com/", { method: "GET", signal: AbortSignal.timeout(5000) });
+      const res = await fetch("https://generativelanguage.googleapis.com/", { method: "GET", signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS) });
       const latency = Date.now() - start;
       
       if (!getApiState().gemini.simulatedDown && !getApiState().gemini.simulatedDegraded) {

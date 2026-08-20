@@ -1,3 +1,5 @@
+const DEGRADED_LATENCY_THRESHOLD_MS = 500;
+
 let optimizationMode = "OFF"; // "OFF" | "COST" | "LATENCY"
 
 let apiState = {
@@ -61,13 +63,13 @@ export const API_COSTS = {
 };
 
 export function getConfig() {
-  return { degradedThreshold: 500 };
+  return { degradedThreshold: DEGRADED_LATENCY_THRESHOLD_MS };
 }
 
 function determineStatus(latency, statusCode, wasError) {
   if (wasError) return "DOWN";
   if (statusCode >= 500) return "DEGRADED";
-  if (latency > 500) return "DEGRADED";
+  if (latency > DEGRADED_LATENCY_THRESHOLD_MS) return "DEGRADED";
   return "HEALTHY";
 }
 
