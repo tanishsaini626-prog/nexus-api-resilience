@@ -2,93 +2,48 @@ import { updateHealthCheck, getApiState, getStatusCounts, getConfig, getCircuitB
 
 const HEALTH_CHECK_TIMEOUT_MS = 5000;
 
+async function checkProviderHealth(name, url) {
+  let flapping = false;
+  try {
+    const start = Date.now();
+    const res = await fetch(url, { method: "GET", signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS) });
+    const latency = Date.now() - start;
+
+    if (!getApiState()[name].simulatedDown && !getApiState()[name].simulatedDegraded) {
+      const oldStatus = getApiState()[name].status;
+      const flapResult = checkFlapping(name, oldStatus, "HEALTHY");
+      flapping = flapResult.isFlapping;
+      if (!flapResult.isFlapping) {
+        updateHealthCheck(name, { latency, statusCode: res.status, wasError: false });
+      }
+    }
+    return { status: getApiState()[name].status, latency, statusCode: res.status, flapping };
+  } catch (e) {
+    if (!getApiState()[name].simulatedDown && !getApiState()[name].simulatedDegraded) {
+      const oldStatus = getApiState()[name].status;
+      const flapResult = checkFlapping(name, oldStatus, "DOWN");
+      flapping = flapResult.isFlapping;
+      if (!flapResult.isFlapping) {
+        updateHealthCheck(name, { latency: null, statusCode: null, wasError: true });
+      }
+    }
+    return { status: getApiState()[name].status, latency: null, flapping };
+  }
+}
+
 export async function GET() {
   try {
-    const results = {};
+    const [openaiResult, anthropicResult, geminiResult] = await Promise.all([
+      checkProviderHealth("openai", "https://api.openai.com/"),
+      checkProviderHealth("anthropic", "https://api.anthropic.com/"),
+      checkProviderHealth("gemini", "https://generativelanguage.googleapis.com/"),
+    ]);
 
-    // Check OpenAI
-    let openaiFlapping = false;
-    try {
-      const start = Date.now();
-      const res = await fetch("https://api.openai.com/", { method: "GET", signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS) });
-      const latency = Date.now() - start;
-      
-      if (!getApiState().openai.simulatedDown && !getApiState().openai.simulatedDegraded) {
-        const oldStatus = getApiState().openai.status;
-        const flapping = checkFlapping("openai", oldStatus, "HEALTHY");
-        openaiFlapping = flapping.isFlapping;
-        if (!flapping.isFlapping) {
-          updateHealthCheck("openai", { latency, statusCode: res.status, wasError: false });
-        }
-      }
-      results.openai = { status: getApiState().openai.status, latency, statusCode: res.status, flapping: openaiFlapping };
-    } catch (e) {
-      if (!getApiState().openai.simulatedDown && !getApiState().openai.simulatedDegraded) {
-        const oldStatus = getApiState().openai.status;
-        const flapping = checkFlapping("openai", oldStatus, "DOWN");
-        openaiFlapping = flapping.isFlapping;
-        if (!flapping.isFlapping) {
-          updateHealthCheck("openai", { latency: null, statusCode: null, wasError: true });
-        }
-      }
-      results.openai = { status: getApiState().openai.status, latency: null, flapping: openaiFlapping };
-    }
-
-    // Check Anthropic
-    let anthropicFlapping = false;
-    try {
-      const start = Date.now();
-      const res = await fetch("https://api.anthropic.com/", { method: "GET", signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS) });
-      const latency = Date.now() - start;
-      
-      if (!getApiState().anthropic.simulatedDown && !getApiState().anthropic.simulatedDegraded) {
-        const oldStatus = getApiState().anthropic.status;
-        const flapping = checkFlapping("anthropic", oldStatus, "HEALTHY");
-        anthropicFlapping = flapping.isFlapping;
-        if (!flapping.isFlapping) {
-          updateHealthCheck("anthropic", { latency, statusCode: res.status, wasError: false });
-        }
-      }
-      results.anthropic = { status: getApiState().anthropic.status, latency, statusCode: res.status, flapping: anthropicFlapping };
-    } catch (e) {
-      if (!getApiState().anthropic.simulatedDown && !getApiState().anthropic.simulatedDegraded) {
-        const oldStatus = getApiState().anthropic.status;
-        const flapping = checkFlapping("anthropic", oldStatus, "DOWN");
-        anthropicFlapping = flapping.isFlapping;
-        if (!flapping.isFlapping) {
-          updateHealthCheck("anthropic", { latency: null, statusCode: null, wasError: true });
-        }
-      }
-      results.anthropic = { status: getApiState().anthropic.status, latency: null, flapping: anthropicFlapping };
-    }
-
-    // Check Gemini
-    let geminiFlapping = false;
-    try {
-      const start = Date.now();
-      const res = await fetch("https://generativelanguage.googleapis.com/", { method: "GET", signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS) });
-      const latency = Date.now() - start;
-      
-      if (!getApiState().gemini.simulatedDown && !getApiState().gemini.simulatedDegraded) {
-        const oldStatus = getApiState().gemini.status;
-        const flapping = checkFlapping("gemini", oldStatus, "HEALTHY");
-        geminiFlapping = flapping.isFlapping;
-        if (!flapping.isFlapping) {
-          updateHealthCheck("gemini", { latency, statusCode: res.status, wasError: false });
-        }
-      }
-      results.gemini = { status: getApiState().gemini.status, latency, statusCode: res.status, flapping: geminiFlapping };
-    } catch (e) {
-      if (!getApiState().gemini.simulatedDown && !getApiState().gemini.simulatedDegraded) {
-        const oldStatus = getApiState().gemini.status;
-        const flapping = checkFlapping("gemini", oldStatus, "DOWN");
-        geminiFlapping = flapping.isFlapping;
-        if (!flapping.isFlapping) {
-          updateHealthCheck("gemini", { latency: null, statusCode: null, wasError: true });
-        }
-      }
-      results.gemini = { status: getApiState().gemini.status, latency: null, flapping: geminiFlapping };
-    }
+    const results = {
+      openai: openaiResult,
+      anthropic: anthropicResult,
+      gemini: geminiResult,
+    };
 
     results.checkedAt = new Date().toISOString();
     results.statusCounts = getStatusCounts();
