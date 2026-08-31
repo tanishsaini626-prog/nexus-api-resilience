@@ -24,6 +24,6 @@ export async function POST(request) {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    return Response.json({ error: "Invalid request" }, { status: 400 });
+    return Response.json({ error: "Invalid request", incidentId: generateIncidentId() }, { status: 400 });
   }
 }

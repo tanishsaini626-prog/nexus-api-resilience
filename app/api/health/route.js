@@ -1,4 +1,4 @@
-import { updateHealthCheck, getApiState, getStatusCounts, getConfig, getCircuitBreakerSummary, setLastKnownHealth, getLastKnownHealth, checkFlapping, getOptimizationMode } from "../../lib/state";
+import { updateHealthCheck, getApiState, getStatusCounts, getConfig, getCircuitBreakerSummary, setLastKnownHealth, getLastKnownHealth, checkFlapping, getOptimizationMode, generateIncidentId } from "../../lib/state";
 
 const HEALTH_CHECK_TIMEOUT_MS = 5000;
 
@@ -65,13 +65,14 @@ export async function GET() {
         degraded: true,
         note: "Health check failed, showing last known state",
         error: error.message,
+        incidentId: generateIncidentId(),
         checkedAt: new Date().toISOString(),
       });
     }
     return Response.json({
       error: "Health check failed",
       message: error.message,
-      incidentId: "INC-" + Date.now().toString(36).slice(-6),
+      incidentId: generateIncidentId(),
       checkedAt: new Date().toISOString(),
     });
   }

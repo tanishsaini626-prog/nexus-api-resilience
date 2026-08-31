@@ -15,12 +15,12 @@ export async function POST(request) {
     const { api, action } = body;
 
     if (!api || !action) {
-      return Response.json({ error: "api and action are required" }, { status: 400 });
+      return Response.json({ error: "api and action are required", incidentId: generateIncidentId() }, { status: 400 });
     }
 
     if (!["openai", "anthropic", "gemini"].includes(api)) {
       return Response.json(
-        { error: "api must be 'openai', 'anthropic', or 'gemini'" },
+        { error: "api must be 'openai', 'anthropic', or 'gemini'", incidentId: generateIncidentId() },
         { status: 400 }
       );
     }
@@ -34,7 +34,7 @@ export async function POST(request) {
       restoreApi(api);
     } else {
       return Response.json(
-        { error: "action must be 'down', 'degraded', or 'up'" },
+        { error: "action must be 'down', 'degraded', or 'up'", incidentId: generateIncidentId() },
         { status: 400 }
       );
     }
@@ -57,6 +57,6 @@ export async function POST(request) {
     });
 
   } catch (error) {
-    return Response.json({ error: error.message }, { status: 500 });
+    return Response.json({ error: error.message, incidentId: generateIncidentId() }, { status: 500 });
   }
 }
