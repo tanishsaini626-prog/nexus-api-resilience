@@ -4,30 +4,33 @@ const HEALTH_CHECK_TIMEOUT_MS = 5000;
 
 async function checkProviderHealth(name, url) {
   let flapping = false;
+  const state = await getApiState();
   try {
     const start = Date.now();
     const res = await fetch(url, { method: "GET", signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS) });
     const latency = Date.now() - start;
 
-    if (!getApiState()[name].simulatedDown && !getApiState()[name].simulatedDegraded) {
-      const oldStatus = getApiState()[name].status;
+    if (!state[name].simulatedDown && !state[name].simulatedDegraded) {
+      const oldStatus = state[name].status;
       const flapResult = checkFlapping(name, oldStatus, "HEALTHY");
       flapping = flapResult.isFlapping;
       if (!flapResult.isFlapping) {
-        updateHealthCheck(name, { latency, statusCode: res.status, wasError: false });
+        await updateHealthCheck(name, { latency, statusCode: res.status, wasError: false });
       }
     }
-    return { status: getApiState()[name].status, latency, statusCode: res.status, flapping };
+    const finalState = await getApiState();
+    return { status: finalState[name].status, latency, statusCode: res.status, flapping };
   } catch (e) {
-    if (!getApiState()[name].simulatedDown && !getApiState()[name].simulatedDegraded) {
-      const oldStatus = getApiState()[name].status;
+    if (!state[name].simulatedDown && !state[name].simulatedDegraded) {
+      const oldStatus = state[name].status;
       const flapResult = checkFlapping(name, oldStatus, "DOWN");
       flapping = flapResult.isFlapping;
       if (!flapResult.isFlapping) {
-        updateHealthCheck(name, { latency: null, statusCode: null, wasError: true });
+        await updateHealthCheck(name, { latency: null, statusCode: null, wasError: true });
       }
     }
-    return { status: getApiState()[name].status, latency: null, flapping };
+    const finalState = await getApiState();
+    return { status: finalState[name].status, latency: null, flapping };
   }
 }
 
@@ -46,10 +49,10 @@ export async function GET() {
     };
 
     results.checkedAt = new Date().toISOString();
-    results.statusCounts = getStatusCounts();
+    results.statusCounts = await getStatusCounts();
     results.optimizationMode = getOptimizationMode();
     results.config = { degradedThreshold: getConfig().degradedThreshold + "ms" };
-    results.circuitBreaker = getCircuitBreakerSummary();
+    results.circuitBreaker = await getCircuitBreakerSummary();
 
     // Save for crash recovery
     setLastKnownHealth(results);

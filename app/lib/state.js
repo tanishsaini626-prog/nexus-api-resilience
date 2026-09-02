@@ -1,8 +1,18 @@
+import { redis } from "./redis";
+
+const API_STATE_KEY = "nexus:apiState";
+
+// NOTE: This read-modify-write pattern has a small race condition
+// window between the Redis get() and set() calls if two requests
+// hit this at the exact same moment. Acceptable for this project's
+// scale; a production system at higher concurrency would use Redis
+// transactions (WATCH/MULTI) or a Lua script to make this atomic.
+
 const DEGRADED_LATENCY_THRESHOLD_MS = 500;
 
 let optimizationMode = "OFF"; // "OFF" | "COST" | "LATENCY"
 
-let apiState = {
+const DEFAULT_API_STATE = {
   openai: {
     status: "HEALTHY",
     latency: 0,
@@ -41,8 +51,9 @@ let apiState = {
   },
 };
 
-export function getApiState() {
-  return apiState;
+export async function getApiState() {
+  const state = await redis.get(API_STATE_KEY);
+  return state || structuredClone(DEFAULT_API_STATE);
 }
 
 export function getOptimizationMode() {
@@ -73,8 +84,9 @@ function determineStatus(latency, statusCode, wasError) {
   return "HEALTHY";
 }
 
-export function updateHealthCheck(apiName, result) {
-  const api = apiState[apiName];
+export async function updateHealthCheck(apiName, result) {
+  const state = await getApiState();
+  const api = state[apiName];
   if (api.simulatedDown || api.simulatedDegraded) return;
 
   const newStatus = determineStatus(result.latency, result.statusCode, result.wasError);
@@ -84,10 +96,12 @@ export function updateHealthCheck(apiName, result) {
   api.status = newStatus;
   api.latency = result.latency || 0;
   api.statusCode = result.statusCode;
+  await redis.set(API_STATE_KEY, state);
 }
 
-export function simulateOutage(api) {
-  const current = apiState[api];
+export async function simulateOutage(api) {
+  const state = await getApiState();
+  const current = state[api];
   current.simulatedDown = true;
   current.simulatedDegraded = false;
   current.status = "DOWN";
@@ -95,18 +109,22 @@ export function simulateOutage(api) {
   current.circuitOpenedAt = Date.now();
   current.totalCircuitOpens++;
   current.lastStatusChange = new Date().toISOString();
+  await redis.set(API_STATE_KEY, state);
 }
 
-export function simulateDegraded(api) {
-  const current = apiState[api];
+export async function simulateDegraded(api) {
+  const state = await getApiState();
+  const current = state[api];
   current.simulatedDegraded = true;
   current.simulatedDown = false;
   current.status = "DEGRADED";
   current.lastStatusChange = new Date().toISOString();
+  await redis.set(API_STATE_KEY, state);
 }
 
-export function restoreApi(api) {
-  const current = apiState[api];
+export async function restoreApi(api) {
+  const state = await getApiState();
+  const current = state[api];
   current.simulatedDown = false;
   current.simulatedDegraded = false;
   current.status = "HEALTHY";
@@ -114,10 +132,12 @@ export function restoreApi(api) {
   current.consecutiveFailures = 0;
   current.circuitOpenedAt = null;
   current.lastStatusChange = new Date().toISOString();
+  await redis.set(API_STATE_KEY, state);
 }
 
-export function getEffectiveStatus(api) {
-  return apiState[api].status;
+export async function getEffectiveStatus(api) {
+  const state = await getApiState();
+  return state[api].status;
 }
 
 // How long an OPEN circuit waits before allowing a single test request through
@@ -125,8 +145,9 @@ export function getEffectiveStatus(api) {
 // below so the reported config always matches the value actually enforced.
 const CIRCUIT_BREAKER_COOLDOWN_MS = 30000;
 
-export function isRequestAllowed(apiName) {
-  const api = apiState[apiName];
+export async function isRequestAllowed(apiName) {
+  const state = await getApiState();
+  const api = state[apiName];
 
   if (api.circuitState === "CLOSED") return { allowed: true, reason: "CLOSED" };
 
@@ -136,6 +157,7 @@ export function isRequestAllowed(apiName) {
       // Cooldown has elapsed: let one request through as a recovery probe.
       api.circuitState = "HALF_OPEN";
       api.lastStatusChange = new Date().toISOString();
+      await redis.set(API_STATE_KEY, state);
       return { allowed: true, reason: "HALF_OPEN_TEST" };
     }
     return { allowed: false, reason: "OPEN", retryAfterMs: CIRCUIT_BREAKER_COOLDOWN_MS - elapsed };
@@ -146,13 +168,15 @@ export function isRequestAllowed(apiName) {
   return { allowed: false, reason: "UNKNOWN" };
 }
 
-export function recordRequestResult(apiName, success) {
-  const api = apiState[apiName];
+export async function recordRequestResult(apiName, success) {
+  const state = await getApiState();
+  const api = state[apiName];
   if (success) {
     api.consecutiveFailures = 0;
     if (api.circuitState === "HALF_OPEN") {
       api.circuitState = "CLOSED";
       api.lastStatusChange = new Date().toISOString();
+      await redis.set(API_STATE_KEY, state);
       return { transitioned: true, from: "HALF_OPEN", to: "CLOSED" };
     }
   } else {
@@ -162,6 +186,7 @@ export function recordRequestResult(apiName, success) {
       api.circuitOpenedAt = Date.now();
       api.totalCircuitOpens++;
       api.lastStatusChange = new Date().toISOString();
+      await redis.set(API_STATE_KEY, state);
       return { transitioned: true, from: "CLOSED", to: "OPEN" };
     }
     if (api.circuitState === "HALF_OPEN") {
@@ -169,16 +194,19 @@ export function recordRequestResult(apiName, success) {
       api.circuitOpenedAt = Date.now();
       api.totalCircuitOpens++;
       api.lastStatusChange = new Date().toISOString();
+      await redis.set(API_STATE_KEY, state);
       return { transitioned: true, from: "HALF_OPEN", to: "OPEN" };
     }
   }
+  await redis.set(API_STATE_KEY, state);
   return { transitioned: false };
 }
 
-export function getStatusCounts() {
+export async function getStatusCounts() {
+  const state = await getApiState();
   let healthy = 0, degraded = 0, down = 0;
   for (const api of ["openai", "anthropic", "gemini"]) {
-    const s = apiState[api].status;
+    const s = state[api].status;
     if (s === "HEALTHY") healthy++;
     else if (s === "DEGRADED") degraded++;
     else if (s === "DOWN") down++;
@@ -186,25 +214,26 @@ export function getStatusCounts() {
   return { healthy, degraded, down };
 }
 
-export function getCircuitBreakerSummary() {
+export async function getCircuitBreakerSummary() {
+  const state = await getApiState();
   return {
     openai: {
-      state: apiState.openai.circuitState,
-      failures: apiState.openai.consecutiveFailures,
+      state: state.openai.circuitState,
+      failures: state.openai.consecutiveFailures,
       threshold: 3,
-      totalOpens: apiState.openai.totalCircuitOpens,
+      totalOpens: state.openai.totalCircuitOpens,
     },
     anthropic: {
-      state: apiState.anthropic.circuitState,
-      failures: apiState.anthropic.consecutiveFailures,
+      state: state.anthropic.circuitState,
+      failures: state.anthropic.consecutiveFailures,
       threshold: 3,
-      totalOpens: apiState.anthropic.totalCircuitOpens,
+      totalOpens: state.anthropic.totalCircuitOpens,
     },
     gemini: {
-      state: apiState.gemini.circuitState,
-      failures: apiState.gemini.consecutiveFailures,
+      state: state.gemini.circuitState,
+      failures: state.gemini.consecutiveFailures,
       threshold: 3,
-      totalOpens: apiState.gemini.totalCircuitOpens,
+      totalOpens: state.gemini.totalCircuitOpens,
     },
     config: { failureThreshold: 3, cooldownDuration: CIRCUIT_BREAKER_COOLDOWN_MS },
   };

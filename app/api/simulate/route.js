@@ -27,11 +27,11 @@ export async function POST(request) {
 
     // Handle three actions: down, degraded, up
     if (action === "down") {
-      simulateOutage(api);
+      await simulateOutage(api);
     } else if (action === "degraded") {
-      simulateDegraded(api);
+      await simulateDegraded(api);
     } else if (action === "up") {
-      restoreApi(api);
+      await restoreApi(api);
     } else {
       return Response.json(
         { error: "action must be 'down', 'degraded', or 'up'", incidentId: generateIncidentId() },
@@ -39,7 +39,7 @@ export async function POST(request) {
       );
     }
 
-    const state = getApiState();
+    const state = await getApiState();
 
     return Response.json({
       success: true,

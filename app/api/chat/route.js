@@ -46,11 +46,11 @@ export async function POST(request) {
     let retryLog = [];
 
     // Try OpenAI with retries
-    const openaiStatus = getEffectiveStatus("openai");
+    const openaiStatus = await getEffectiveStatus("openai");
     // Optimizer Agent Routing Logic
     const optimizationMode = getOptimizationMode();
     let providers = ["openai", "anthropic", "gemini"];
-    const state = getApiState();
+    const state = await getApiState();
 
     if (optimizationMode === "COST") {
       providers.sort((a, b) => API_COSTS[a] - API_COSTS[b]);
@@ -67,8 +67,8 @@ export async function POST(request) {
     for (const api of providers) {
       if (routedTo) break;
 
-      const apiStatus = getEffectiveStatus(api);
-      const circuit = isRequestAllowed(api);
+      const apiStatus = await getEffectiveStatus(api);
+      const circuit = await isRequestAllowed(api);
 
       if (apiStatus !== "DOWN" && circuit.allowed) {
         if (!circuitReason && api !== providers[0]) {
@@ -82,7 +82,7 @@ export async function POST(request) {
             
             response = await callFn[api](body.message, controller.signal);
             clearTimeout(timeoutId);
-            recordRequestResult(api, true);
+            await recordRequestResult(api, true);
             
             if (attempt > 0) {
               retryLog.push({ attempt: attempt + 1, api, success: true, delay: getRetryDelay(attempt - 1) + "ms" });
@@ -92,7 +92,7 @@ export async function POST(request) {
           } catch (error) {
             clearTimeout(timeoutId);
             
-            const failResult = recordRequestResult(api, false);
+            const failResult = await recordRequestResult(api, false);
             if (failResult.transitioned && !circuitReason) {
               circuitReason = "Circuit " + failResult.from + " → " + failResult.to;
             }
@@ -133,14 +133,16 @@ export async function POST(request) {
       }, { status: 503 });
     }
 
+    const finalState = await getApiState();
+
     return Response.json({
       message: response,
       routedTo,
       routedAt: new Date().toISOString(),
       circuitReason,
       retryLog,
-      apiStatus: getEffectiveStatus(routedTo),
-      circuitState: state[routedTo].circuitState,
+      apiStatus: await getEffectiveStatus(routedTo),
+      circuitState: finalState[routedTo].circuitState,
     });
   } catch (error) {
     return Response.json({
@@ -152,7 +154,7 @@ export async function POST(request) {
 }
 
 async function callOpenAI(msg, signal) {
-  if (getApiState().openai.status === "DOWN") throw new Error("API is down");
+  if ((await getApiState()).openai.status === "DOWN") throw new Error("API is down");
   if (signal?.aborted) throw new Error("Request timeout");
   if (Math.random() < 0.3) throw new Error("Transient error: Connection reset");
   await sleep(150);
@@ -160,14 +162,14 @@ async function callOpenAI(msg, signal) {
 }
 
 async function callAnthropic(msg, signal) {
-  if (getApiState().anthropic.status === "DOWN") throw new Error("API is down");
+  if ((await getApiState()).anthropic.status === "DOWN") throw new Error("API is down");
   if (signal?.aborted) throw new Error("Request timeout");
   await sleep(200);
   return "[Anthropic Claude] Received: \"" + msg + "\"";
 }
 
 async function callGemini(msg, signal) {
-  if (getApiState().gemini.status === "DOWN") throw new Error("API is down");
+  if ((await getApiState()).gemini.status === "DOWN") throw new Error("API is down");
   if (signal?.aborted) throw new Error("Request timeout");
   await sleep(180);
   return "[Google Gemini] Received: \"" + msg + "\"";
