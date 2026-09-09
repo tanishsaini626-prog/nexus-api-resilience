@@ -1,6 +1,15 @@
 import { simulateOutage, simulateDegraded, restoreApi, getApiState, checkRateLimit, generateIncidentId } from "../../lib/state";
 
 export async function POST(request) {
+  const adminSecret = request.headers.get("x-admin-secret");
+
+  if (!adminSecret || adminSecret !== process.env.ADMIN_ACTION_SECRET) {
+    return Response.json(
+      { error: "Unauthorized", incidentId: generateIncidentId() },
+      { status: 401 }
+    );
+  }
+
   try {
     const rateCheck = checkRateLimit();
     if (!rateCheck.allowed) {

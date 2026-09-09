@@ -18,6 +18,14 @@ export default function Home() {
   const [rateLimitCount, setRateLimitCount] = useState(null);
   const [rateLimitReset, setRateLimitReset] = useState(0);
   const [optimizationMode, setOptimizationMode] = useState("OFF");
+  const [adminSecret, setAdminSecret] = useState(null);
+
+  const getAdminSecret = () => {
+    if (adminSecret) return adminSecret;
+    const entered = window.prompt("Enter staff password to perform this action:");
+    if (entered) setAdminSecret(entered);
+    return entered;
+  };
 
   const fetchHealth = async () => {
     try {
@@ -80,12 +88,23 @@ export default function Home() {
 
 
   const simulateApi = async (api, action) => {
+    const secret = getAdminSecret();
+    if (!secret) return;
+
     try {
       const response = await fetch("/api/simulate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-secret": secret,
+        },
         body: JSON.stringify({ api, action }),
       });
+      if (response.status === 401) {
+        setAdminSecret(null);
+        console.error("Simulate error:", "Unauthorized");
+        return;
+      }
       const result = await response.json();
       if (result.success) {
         const timestamp = new Date().toLocaleTimeString();
@@ -267,6 +286,9 @@ export default function Home() {
           optimizationMode={optimizationMode}
           setOptimizationMode={setOptimizationMode}
           fetchHealth={fetchHealth}
+          adminSecret={adminSecret}
+          getAdminSecret={getAdminSecret}
+          setAdminSecret={setAdminSecret}
         />
 
         {/* Test Router */}

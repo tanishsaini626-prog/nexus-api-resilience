@@ -1,14 +1,32 @@
 "use client";
 
-export default function OptimizerControls({ optimizationMode = "OFF", setOptimizationMode, fetchHealth }) {
+export default function OptimizerControls({
+  optimizationMode = "OFF",
+  setOptimizationMode,
+  fetchHealth,
+  adminSecret,
+  getAdminSecret,
+  setAdminSecret,
+}) {
   const toggleOptimizationMode = async (mode) => {
+    const secret = getAdminSecret ? getAdminSecret() : adminSecret;
+    if (!secret) return;
+
     if (setOptimizationMode) setOptimizationMode(mode);
     try {
-      await fetch("/api/settings", {
+      const response = await fetch("/api/settings", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-secret": secret,
+        },
         body: JSON.stringify({ mode }),
       });
+      if (response.status === 401) {
+        if (setAdminSecret) setAdminSecret(null);
+        console.error("Failed to toggle optimization:", "Unauthorized");
+        return;
+      }
       if (fetchHealth) fetchHealth(); // refresh immediately
     } catch (error) {
       console.error("Failed to toggle optimization:", error);
