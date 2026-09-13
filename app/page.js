@@ -12,6 +12,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [events, setEvents] = useState([]);
   const [latencyHistory, setLatencyHistory] = useState([]);
+  const [healthCheckError, setHealthCheckError] = useState(false);
 
   const [lastRoutedTo, setLastRoutedTo] = useState(null);
   const [failoverFlash, setFailoverFlash] = useState(false);
@@ -33,6 +34,7 @@ export default function Home() {
       const result = await response.json();
       setData(result);
       setLoading(false);
+      setHealthCheckError(false);
 
       const timestamp = new Date(result.checkedAt).toLocaleTimeString();
 
@@ -81,6 +83,7 @@ export default function Home() {
       setLoading(false);
     } catch (error) {
       console.error("Failed to fetch health:", error);
+      setHealthCheckError(true);
       setLoading(false);
     }
   };
@@ -151,6 +154,12 @@ export default function Home() {
   return (
     <main className={`min-h-screen bg-[#09090b] text-white transition-colors duration-300 ${failoverFlash ? "bg-red-950/20" : ""}`}>
       
+      {healthCheckError && (
+        <div className="bg-red-500/10 border-b border-red-500/30 px-6 py-2 text-center">
+          <span className="text-xs font-medium text-red-400">Unable to reach the server — retrying automatically...</span>
+        </div>
+      )}
+
       {failoverFlash && (
         <div className="bg-cyan-500/10 border-b border-cyan-500/30 px-6 py-2 text-center">
           <span className="text-xs font-medium text-cyan-400">⚡ STATE CHANGE — System reacting</span>
