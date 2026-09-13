@@ -42,7 +42,13 @@ export default function EventLog({ events = [] }) {
         <span className="text-[10px] text-zinc-700">{events.length} events</span>
         <div className="flex-1 h-px bg-zinc-800/50"></div>
       </div>
-      <div ref={logRef} className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl h-[500px] overflow-y-auto">
+      <div
+        ref={logRef}
+        aria-live="polite"
+        aria-atomic="false"
+        aria-label="Live event log"
+        className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl h-[500px] overflow-y-auto"
+      >
         {events.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-zinc-700">
             <div className="w-8 h-8 rounded-full bg-zinc-800/50 flex items-center justify-center mb-2"><span className="text-xs">📡</span></div>
