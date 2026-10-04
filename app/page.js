@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { supabase } from "./lib/supabase";
 import LatencyChart from "./components/LatencyChart";
 import EventLog from "./components/EventLog";
 import StatusGrid from "./components/StatusGrid";
@@ -8,6 +10,8 @@ import ChatPanel from "./components/ChatPanel";
 import OptimizerControls from "./components/OptimizerControls";
 
 export default function Home() {
+  const router = useRouter();
+  const [authChecking, setAuthChecking] = useState(true);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [events, setEvents] = useState([]);
@@ -133,6 +137,35 @@ export default function Home() {
   };
 
   useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) {
+        router.push("/login");
+      } else {
+        setAuthChecking(false);
+      }
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) {
+        router.push("/login");
+      } else {
+        setAuthChecking(false);
+      }
+    });
+
+    return () => {
+      subscription?.unsubscribe();
+    };
+  }, [router]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push("/login");
+  };
+
+  useEffect(() => {
     let ignore = false;
     async function load() {
       if (!ignore) {
@@ -150,6 +183,17 @@ export default function Home() {
   const statusCounts = data?.statusCounts || { healthy: 0, degraded: 0, down: 0 };
   const totalIncidents = events.filter((e) => e.status === "DOWN" || e.status === "DEGRADED" || e.status === "FAILOVER" || e.status === "FLAPPING").length;
   const cb = data?.circuitBreaker;
+
+  if (authChecking) {
+    return (
+      <main className="min-h-screen bg-[#09090b] text-white flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-6 h-6 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+          <span className="text-xs text-zinc-500 font-mono tracking-wider uppercase">Loading...</span>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className={`min-h-screen bg-[#09090b] text-white transition-colors duration-300 ${failoverFlash ? "bg-red-950/20" : ""}`}>
@@ -178,24 +222,32 @@ export default function Home() {
               <span className="text-xs text-zinc-600 ml-2">v0.3.0</span>
             </div>
           </div>
-          <div className="hidden md:flex items-center gap-4">
-            <div className="flex items-center gap-1.5">
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
-              <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Sentinel</span>
+          <div className="flex items-center gap-4">
+            <div className="hidden md:flex items-center gap-4">
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Sentinel</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Router</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Circuit Breaker</span>
+              </div>
+              <div className="w-px h-4 bg-zinc-800 mx-1"></div>
+              <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                <span className="text-xs text-zinc-500">Live</span>
+              </div>
             </div>
-            <div className="flex items-center gap-1.5">
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
-              <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Router</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
-              <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Circuit Breaker</span>
-            </div>
-            <div className="w-px h-4 bg-zinc-800 mx-1"></div>
-            <div className="flex items-center gap-1.5">
-              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-              <span className="text-xs text-zinc-500">Live</span>
-            </div>
+            <button
+              onClick={handleLogout}
+              className="text-xs font-medium px-3 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 hover:border-zinc-700 transition-all cursor-pointer"
+            >
+              Log out
+            </button>
           </div>
         </div>
       </nav>

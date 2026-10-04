@@ -1,16 +1,27 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "../lib/supabase";
 
 export default function LoginPage() {
   const router = useRouter();
+  const [checkingAuth, setCheckingAuth] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) {
+        router.push("/");
+      } else {
+        setCheckingAuth(false);
+      }
+    });
+  }, [router]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -35,6 +46,17 @@ export default function LoginPage() {
       setLoading(false);
     }
   };
+
+  if (checkingAuth) {
+    return (
+      <main className="min-h-screen bg-[#09090b] text-white flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-6 h-6 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+          <span className="text-xs text-zinc-500 font-mono tracking-wider uppercase">Loading...</span>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-[#09090b] text-white flex items-center justify-center px-4 py-12">
