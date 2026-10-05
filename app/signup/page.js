@@ -15,8 +15,8 @@ export default function SignUpPage() {
   const [successMsg, setSuccessMsg] = useState("");
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) {
+    supabase.auth.getUser().then(({ data: { user }, error }) => {
+      if (!error && user) {
         router.push("/");
       } else {
         setCheckingAuth(false);
@@ -39,6 +39,9 @@ export default function SignUpPage() {
       const { data, error } = await supabase.auth.signUp({ email, password });
       if (error) {
         setErrorMsg(error.message);
+      } else if (data?.user && data.user.identities && data.user.identities.length === 0) {
+        setErrorMsg("This email is already registered. Try logging in instead.");
+        return;
       } else {
         setSuccessMsg("Check your email to confirm your account.");
       }

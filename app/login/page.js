@@ -14,8 +14,8 @@ export default function LoginPage() {
   const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) {
+    supabase.auth.getUser().then(({ data: { user }, error }) => {
+      if (!error && user) {
         router.push("/");
       } else {
         setCheckingAuth(false);

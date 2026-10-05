@@ -137,8 +137,8 @@ export default function Home() {
   };
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) {
+    supabase.auth.getUser().then(({ data: { user }, error }) => {
+      if (error || !user) {
         router.push("/login");
       } else {
         setAuthChecking(false);
