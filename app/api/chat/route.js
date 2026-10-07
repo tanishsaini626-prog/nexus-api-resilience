@@ -1,12 +1,17 @@
 import { getEffectiveStatus, isRequestAllowed, recordRequestResult, getApiState, getRetryConfig, getRetryDelay, checkRateLimit, shouldDebounce, generateIncidentId, getOptimizationMode, API_COSTS } from "../../lib/state";
 import { getUserFromRequest } from "../../lib/auth";
+import { getProviderKeys } from "../../lib/keys";
 
 const CHAT_REQUEST_TIMEOUT_MS = 10000;
+// Free-tier model (Google AI Studio). Swap the string to change models —
+// no other code depends on it. (2.0-flash was retired server-side; the API
+// itself named 3.8-flash as its replacement.)
+const GEMINI_MODEL = "gemini-3.8-flash";
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 export async function POST(request) {
-  const { user, error } = await getUserFromRequest(request);
+  const { user, token, error } = await getUserFromRequest(request);
   if (!user) {
     return Response.json(
       { error: error || "Unauthorized", incidentId: generateIncidentId() },
@@ -54,6 +59,11 @@ export async function POST(request) {
     let circuitReason = null;
     let retryLog = [];
 
+    // BYOK: fetch this user's stored provider keys once per request. A
+    // provider without a key runs in simulation mode; a failed key lookup
+    // also falls back to simulation (never blocks chat).
+    const keys = (await getProviderKeys(token)) || {};
+
     // Try OpenAI with retries
     const openaiStatus = await getEffectiveStatus(user.id, "openai");
     // Optimizer Agent Routing Logic
@@ -94,7 +104,7 @@ export async function POST(request) {
             const controller = new AbortController();
             timeoutId = setTimeout(() => controller.abort(), CHAT_REQUEST_TIMEOUT_MS);
 
-            response = await callFn[api](user.id, body.message, controller.signal);
+            response = await callFn[api](user.id, body.message, controller.signal, keys);
             clearTimeout(timeoutId);
             await recordRequestResult(user.id, api, true);
             
@@ -185,9 +195,51 @@ async function callAnthropic(userId, msg, signal) {
   return "[Anthropic Claude] Received: \"" + msg + "\"";
 }
 
-async function callGemini(userId, msg, signal) {
-  if ((await getApiState(userId)).gemini.status === "DOWN") throw new Error("API is down");
-  if (signal?.aborted) throw new Error("Request timeout");
-  await sleep(180);
-  return "[Google Gemini] Received: \"" + msg + "\"";
+async function callGemini(userId, msg, signal, keys) {
+  // SIM mode: no key stored — keep the original simulated behavior so the
+  // dashboard's failover demo works with zero keys configured.
+  if (!keys?.gemini) {
+    if ((await getApiState(userId)).gemini.status === "DOWN") throw new Error("API is down");
+    if (signal?.aborted) throw new Error("Request timeout");
+    await sleep(180);
+    return "[Google Gemini] Received: \"" + msg + "\"";
+  }
+  return callGeminiReal(keys.gemini, msg, signal);
+}
+
+async function callGeminiReal(apiKey, msg, signal) {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({ contents: [{ parts: [{ text: msg }] }] }),
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    // Any failure — bad key (403), rate limit (429), provider 5xx — becomes a
+    // normal thrown error, so the existing retry + circuit-breaker pipeline
+    // reacts to real provider failures exactly like simulated ones.
+    let detail = "";
+    try {
+      const errBody = await response.json();
+      detail = errBody?.error?.message || "";
+    } catch {
+      // non-JSON error body — status code alone is still useful
+    }
+    throw new Error(`Gemini API error ${response.status}${detail ? ": " + detail : ""}`);
+  }
+
+  const data = await response.json();
+  const text = (data?.candidates?.[0]?.content?.parts || [])
+    .map((p) => p.text)
+    .filter(Boolean)
+    .join("");
+  if (!text) throw new Error("Gemini returned no content");
+  return text;
 }

@@ -21,3 +21,21 @@ export function createUserSupabaseClient(token) {
 export function maskKey(apiKey) {
   return "••••" + String(apiKey).slice(-4);
 }
+
+// Returns { openai: "...", gemini: "..." } for the caller's own rows (RLS
+// scopes the query), {} when no keys are stored, or null if the DB lookup
+// itself failed — the caller falls back to simulation so chat keeps working.
+export async function getProviderKeys(token) {
+  try {
+    const supabase = createUserSupabaseClient(token);
+    const { data, error } = await supabase
+      .from("provider_keys")
+      .select("provider, api_key");
+    if (error) return null;
+    const map = {};
+    for (const row of data) map[row.provider] = row.api_key;
+    return map;
+  } catch {
+    return null;
+  }
+}
