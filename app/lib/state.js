@@ -336,23 +336,64 @@ export function checkFlapping(apiName, oldStatus, newStatus) {
   return { isFlapping: false, locked: false };
 }
 
-// Rate limiting for chat
-const rateLimitState = {
-  timestamps: [],
-  maxPerMinute: 20,
-};
+// ============================================
+// PER-USER RATE LIMITING (Phase 15)
+// ============================================
 
-export function checkRateLimit() {
+// Sliding window per user, stored in Redis so it works across route bundles
+// and serverless instances and survives restarts. Two windows:
+//   - per-minute: sorted set of request timestamps (true sliding window)
+//   - per-day: a counter with a TTL, keyed by UTC date
+// Same benign race as the state read-modify-write above: two simultaneous
+// requests from one user could both squeeze past a boundary. Acceptable at
+// this scale; a Lua script would make it atomic.
+const RATE_LIMIT_PER_MINUTE = 20;
+const RATE_LIMIT_PER_DAY = 200;
+const MINUTE_WINDOW_MS = 60000;
+
+function getRateLimitMinuteKey(userId) {
+  return `nexus:rateLimit:minute:${userId}`;
+}
+
+function getRateLimitDayKey(userId) {
+  return `nexus:rateLimit:day:${userId}:${new Date().toISOString().slice(0, 10)}`;
+}
+
+export async function checkRateLimit(userId) {
   const now = Date.now();
-  // Remove timestamps older than 1 minute
-  rateLimitState.timestamps = rateLimitState.timestamps.filter((t) => now - t < 60000);
+  const minuteKey = getRateLimitMinuteKey(userId);
 
-  if (rateLimitState.timestamps.length >= rateLimitState.maxPerMinute) {
-    return { allowed: false, remaining: 0, resetIn: 60000 - (now - rateLimitState.timestamps[0]) };
+  // Drop timestamps that have aged out of the window, then count what remains.
+  await redis.zremrangebyscore(minuteKey, 0, now - MINUTE_WINDOW_MS);
+  const count = await redis.zcard(minuteKey);
+
+  if (count >= RATE_LIMIT_PER_MINUTE) {
+    return { allowed: false, remaining: 0, resetIn: MINUTE_WINDOW_MS, reason: "minute" };
   }
 
-  rateLimitState.timestamps.push(now);
-  return { allowed: true, remaining: rateLimitState.maxPerMinute - rateLimitState.timestamps.length };
+  // Daily cap: counter keyed by UTC date; TTL self-cleans it the next day.
+  const dayKey = getRateLimitDayKey(userId);
+  const dayCount = await redis.incr(dayKey);
+  if (dayCount === 1) {
+    await redis.expire(dayKey, 90000); // 25h
+  }
+  if (dayCount > RATE_LIMIT_PER_DAY) {
+    const tomorrowUtc = Date.UTC(
+      new Date(now).getUTCFullYear(),
+      new Date(now).getUTCMonth(),
+      new Date(now).getUTCDate() + 1
+    );
+    return { allowed: false, remaining: 0, resetIn: tomorrowUtc - now, reason: "daily" };
+  }
+
+  // Record this request in the sliding window.
+  await redis.zadd(minuteKey, {
+    score: now,
+    member: `${now}-${Math.random().toString(36).slice(2, 8)}`,
+  });
+  await redis.expire(minuteKey, 120); // 2x window — self-cleans when idle
+
+  return { allowed: true, remaining: RATE_LIMIT_PER_MINUTE - count - 1 };
 }
 
 // Last known health state (for crash recovery)

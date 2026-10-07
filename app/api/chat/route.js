@@ -26,11 +26,13 @@ export async function POST(request) {
   }
 
   try {
-    // EDGE CASE: Rate limiting
-    const rateCheck = checkRateLimit();
+    // EDGE CASE: Rate limiting (per-user, Redis-backed sliding window)
+    const rateCheck = await checkRateLimit(user.id);
     if (!rateCheck.allowed) {
       return Response.json({
-        error: "Rate limit exceeded",
+        error: rateCheck.reason === "daily"
+          ? "Daily limit reached (200 messages/day)"
+          : "Rate limit exceeded (20 messages/minute)",
         incidentId: generateIncidentId(),
         retryAfter: Math.ceil(rateCheck.resetIn / 1000),
       }, { status: 429 });

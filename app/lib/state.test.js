@@ -4,12 +4,33 @@ import { vi, describe, it, expect, beforeEach } from "vitest";
 // Redis Mock Setup (In-Memory Fake Store)
 // ============================================================================
 let fakeStore = {};
+let fakeZsets = {};
+
+function fakeZset(key) {
+  if (!fakeZsets[key]) fakeZsets[key] = [];
+  return fakeZsets[key];
+}
 
 vi.mock("./redis", () => ({
   redis: {
     get: vi.fn(async (key) => fakeStore[key] ?? null),
     set: vi.fn(async (key, value) => {
       fakeStore[key] = value;
+    }),
+    incr: vi.fn(async (key) => {
+      fakeStore[key] = (Number(fakeStore[key]) || 0) + 1;
+      return fakeStore[key];
+    }),
+    expire: vi.fn(async () => 1),
+    zadd: vi.fn(async (key, { score, member }) => {
+      fakeZset(key).push({ score, member });
+      return 1;
+    }),
+    zcard: vi.fn(async (key) => fakeZset(key).length),
+    zremrangebyscore: vi.fn(async (key, min, max) => {
+      const before = fakeZset(key).length;
+      fakeZsets[key] = fakeZset(key).filter((e) => e.score < min || e.score > max);
+      return before - fakeZsets[key].length;
     }),
   },
 }));
@@ -114,32 +135,6 @@ describe("state.js - Pure Synchronous Functions", () => {
       const resLocked = checkFlapping("gemini", "DOWN", "HEALTHY");
       expect(resLocked.isFlapping).toBe(true);
       expect(resLocked.locked).toBe(true);
-    });
-  });
-
-  // --------------------------------------------------------------------------
-  // checkRateLimit()
-  // maxPerMinute: 20
-  // Note: Uses module-level rateLimitState.timestamps without a reset function.
-  // Ordering is deliberate: all 20 allowed requests run first, followed by the
-  // 21st rejected request.
-  // --------------------------------------------------------------------------
-  describe("checkRateLimit", () => {
-    it("allows requests up to maxPerMinute (20) and rejects subsequent requests", () => {
-      const maxPerMinute = 20;
-
-      // First 20 calls must be allowed, remaining count decreasing from 19 down to 0
-      for (let i = 0; i < maxPerMinute; i++) {
-        const result = checkRateLimit();
-        expect(result.allowed).toBe(true);
-        expect(result.remaining).toBe(maxPerMinute - (i + 1));
-      }
-
-      // 21st call within the same 1-minute window should be rejected
-      const rejected = checkRateLimit();
-      expect(rejected.allowed).toBe(false);
-      expect(rejected.remaining).toBe(0);
-      expect(rejected.resetIn).toBeGreaterThan(0);
     });
   });
 
@@ -392,5 +387,57 @@ describe("state.js - Redis-Dependent Circuit Breaker & State Functions", () => {
         cooldownDuration: 30000,
       },
     });
+  });
+});
+
+// ============================================================================
+// SECTION 3: Per-User Rate Limiting (Redis sliding window + daily cap)
+// ============================================================================
+describe("state.js - Per-User Rate Limiting", () => {
+  const RATE_USER = "rate-limit-user-1";
+
+  beforeEach(() => {
+    fakeStore = {};
+    fakeZsets = {};
+  });
+
+  it("allows 20 requests per minute, then blocks the 21st (remaining counts down)", async () => {
+    for (let i = 0; i < 20; i++) {
+      const result = await checkRateLimit(RATE_USER);
+      expect(result.allowed).toBe(true);
+      expect(result.remaining).toBe(20 - (i + 1));
+    }
+
+    const rejected = await checkRateLimit(RATE_USER);
+    expect(rejected.allowed).toBe(false);
+    expect(rejected.remaining).toBe(0);
+    expect(rejected.reason).toBe("minute");
+    expect(rejected.resetIn).toBeGreaterThan(0);
+  });
+
+  it("tracks users independently — one user's limit never affects another", async () => {
+    for (let i = 0; i < 20; i++) {
+      await checkRateLimit("user-a");
+    }
+    const blockedA = await checkRateLimit("user-a");
+    expect(blockedA.allowed).toBe(false);
+
+    const allowedB = await checkRateLimit("user-b");
+    expect(allowedB.allowed).toBe(true);
+    expect(allowedB.remaining).toBe(19);
+  });
+
+  it("enforces the 200/day cap even when the minute window is clear", async () => {
+    for (let i = 0; i < 200; i++) {
+      fakeZsets = {}; // clear minute windows to isolate the daily cap
+      const result = await checkRateLimit("daily-user");
+      expect(result.allowed).toBe(true);
+    }
+
+    fakeZsets = {};
+    const rejected = await checkRateLimit("daily-user");
+    expect(rejected.allowed).toBe(false);
+    expect(rejected.reason).toBe("daily");
+    expect(rejected.resetIn).toBeGreaterThan(0);
   });
 });
