@@ -7,6 +7,12 @@ const CHAT_REQUEST_TIMEOUT_MS = 10000;
 // no other code depends on it. (2.0-flash was retired server-side; the API
 // itself named 3.8-flash as its replacement.)
 const GEMINI_MODEL = "gemini-3.8-flash";
+// Cheapest-tier models for the other two providers. These are unverified
+// defaults — no key exists to test against yet. If a provider retires one,
+// its API error names the replacement (as Gemini's 404 did above), and the
+// fix is this one line.
+const OPENAI_MODEL = "gpt-4o-mini";
+const ANTHROPIC_MODEL = "claude-3-5-haiku-latest";
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -180,19 +186,98 @@ export async function POST(request) {
   }
 }
 
-async function callOpenAI(userId, msg, signal) {
-  if ((await getApiState(userId)).openai.status === "DOWN") throw new Error("API is down");
-  if (signal?.aborted) throw new Error("Request timeout");
-  if (Math.random() < 0.3) throw new Error("Transient error: Connection reset");
-  await sleep(150);
-  return "[OpenAI GPT-4o] Received: \"" + msg + "\"";
+async function callOpenAI(userId, msg, signal, keys) {
+  // SIM mode: no key stored — original simulated behavior so the failover
+  // demo works with zero keys configured.
+  if (!keys?.openai) {
+    if ((await getApiState(userId)).openai.status === "DOWN") throw new Error("API is down");
+    if (signal?.aborted) throw new Error("Request timeout");
+    if (Math.random() < 0.3) throw new Error("Transient error: Connection reset");
+    await sleep(150);
+    return "[OpenAI GPT-4o] Received: \"" + msg + "\"";
+  }
+  return callOpenAIReal(keys.openai, msg, signal);
 }
 
-async function callAnthropic(userId, msg, signal) {
-  if ((await getApiState(userId)).anthropic.status === "DOWN") throw new Error("API is down");
-  if (signal?.aborted) throw new Error("Request timeout");
-  await sleep(200);
-  return "[Anthropic Claude] Received: \"" + msg + "\"";
+async function callOpenAIReal(apiKey, msg, signal) {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [{ role: "user", content: msg }],
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    // Any failure — bad key (401), rate limit (429), provider 5xx — becomes a
+    // normal thrown error, so the existing retry + circuit-breaker pipeline
+    // reacts to real provider failures exactly like simulated ones.
+    let detail = "";
+    try {
+      const errBody = await response.json();
+      detail = errBody?.error?.message || "";
+    } catch {
+      // non-JSON error body — status code alone is still useful
+    }
+    throw new Error(`OpenAI API error ${response.status}${detail ? ": " + detail : ""}`);
+  }
+
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw new Error("OpenAI returned no content");
+  return text;
+}
+
+async function callAnthropic(userId, msg, signal, keys) {
+  // SIM mode: no key stored — original simulated behavior.
+  if (!keys?.anthropic) {
+    if ((await getApiState(userId)).anthropic.status === "DOWN") throw new Error("API is down");
+    if (signal?.aborted) throw new Error("Request timeout");
+    await sleep(200);
+    return "[Anthropic Claude] Received: \"" + msg + "\"";
+  }
+  return callAnthropicReal(keys.anthropic, msg, signal);
+}
+
+async function callAnthropicReal(apiKey, msg, signal) {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: ANTHROPIC_MODEL,
+      max_tokens: 1024,
+      messages: [{ role: "user", content: msg }],
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const errBody = await response.json();
+      detail = errBody?.error?.message || "";
+    } catch {
+      // non-JSON error body — status code alone is still useful
+    }
+    throw new Error(`Anthropic API error ${response.status}${detail ? ": " + detail : ""}`);
+  }
+
+  const data = await response.json();
+  const text = (data?.content || [])
+    .map((block) => block.text)
+    .filter(Boolean)
+    .join("");
+  if (!text) throw new Error("Anthropic returned no content");
+  return text;
 }
 
 async function callGemini(userId, msg, signal, keys) {
