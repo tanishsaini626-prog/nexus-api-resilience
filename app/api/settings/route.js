@@ -24,12 +24,12 @@ export async function POST(request) {
     const { mode } = body;
 
     if (["OFF", "COST", "LATENCY"].includes(mode)) {
-      setOptimizationMode(mode);
+      await setOptimizationMode(user.id, mode);
     }
 
     return Response.json({
       success: true,
-      optimizationMode: getOptimizationMode(),
+      optimizationMode: await getOptimizationMode(user.id),
       timestamp: new Date().toISOString(),
     });
   } catch (error) {

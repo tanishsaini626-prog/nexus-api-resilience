@@ -57,7 +57,7 @@ export async function POST(request) {
     // Try OpenAI with retries
     const openaiStatus = await getEffectiveStatus(user.id, "openai");
     // Optimizer Agent Routing Logic
-    const optimizationMode = getOptimizationMode();
+    const optimizationMode = await getOptimizationMode(user.id);
     let providers = ["openai", "anthropic", "gemini"];
     const state = await getApiState(user.id);
 
@@ -85,10 +85,15 @@ export async function POST(request) {
         }
 
         for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+          // Declared outside try because the catch block must also clear it:
+          // a const inside the try block is invisible to catch (block
+          // scoping), which made every failed attempt throw a masking
+          // ReferenceError instead of recording the real provider error.
+          let timeoutId = null;
           try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), CHAT_REQUEST_TIMEOUT_MS);
-            
+            timeoutId = setTimeout(() => controller.abort(), CHAT_REQUEST_TIMEOUT_MS);
+
             response = await callFn[api](user.id, body.message, controller.signal);
             clearTimeout(timeoutId);
             await recordRequestResult(user.id, api, true);
@@ -154,6 +159,9 @@ export async function POST(request) {
       circuitState: finalState[routedTo].circuitState,
     });
   } catch (error) {
+    // Log the real cause — returning "Internal server error" without logging
+    // made 500s undiagnosable from the terminal.
+    console.error("Chat route error:", error);
     return Response.json({
       error: "Internal server error",
       message: error.message,

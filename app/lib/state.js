@@ -12,8 +12,6 @@ function getApiStateKey(userId) {
 
 const DEGRADED_LATENCY_THRESHOLD_MS = 500;
 
-let optimizationMode = "OFF"; // "OFF" | "COST" | "LATENCY"
-
 const DEFAULT_API_STATE = {
   openai: {
     status: "HEALTHY",
@@ -58,13 +56,18 @@ export async function getApiState(userId) {
   return state || structuredClone(DEFAULT_API_STATE);
 }
 
-export function getOptimizationMode() {
-  return optimizationMode;
+// Routing mode is stored in Redis PER USER (not in module memory): under
+// Turbopack dev each route bundle gets its own copy of this module, and in
+// production each API route is a separate serverless function — in both
+// cases, in-memory state written by /api/settings is invisible to /api/chat.
+export async function getOptimizationMode(userId) {
+  const mode = await redis.get(`nexus:optimizationMode:${userId}`);
+  return mode || "OFF";
 }
 
-export function setOptimizationMode(mode) {
+export async function setOptimizationMode(userId, mode) {
   if (["OFF", "COST", "LATENCY"].includes(mode)) {
-    optimizationMode = mode;
+    await redis.set(`nexus:optimizationMode:${userId}`, mode);
   }
 }
 

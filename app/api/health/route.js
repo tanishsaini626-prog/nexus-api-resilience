@@ -59,7 +59,7 @@ export async function GET(request) {
 
     results.checkedAt = new Date().toISOString();
     results.statusCounts = await getStatusCounts(user.id);
-    results.optimizationMode = getOptimizationMode();
+    results.optimizationMode = await getOptimizationMode(user.id);
     results.config = { degradedThreshold: getConfig().degradedThreshold + "ms" };
     results.circuitBreaker = await getCircuitBreakerSummary(user.id);
 
