@@ -8,6 +8,7 @@ import EventLog from "./components/EventLog";
 import StatusGrid from "./components/StatusGrid";
 import ChatPanel from "./components/ChatPanel";
 import OptimizerControls from "./components/OptimizerControls";
+import ApiKeyPanel from "./components/ApiKeyPanel";
 
 export default function Home() {
   const router = useRouter();
@@ -329,6 +330,9 @@ export default function Home() {
                 </div>
               </div>
             </div>
+
+            {/* API Keys (BYOK) */}
+            <ApiKeyPanel getAuthHeaders={getAuthHeaders} />
           </div>
 
           {/* Right: Event Log */}
