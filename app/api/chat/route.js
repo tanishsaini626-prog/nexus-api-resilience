@@ -154,6 +154,9 @@ export async function POST(request) {
     // EDGE CASE: All APIs failed
     if (!routedTo) {
       const incidentId = generateIncidentId();
+      // The client only shows the summary line; log per-attempt details so
+      // the incident is diagnosable from the server log afterwards.
+      console.error(`Chat ${incidentId} — all providers failed:`, JSON.stringify(retryLog));
       return Response.json({
         error: "All APIs unavailable after retries",
         incidentId,
