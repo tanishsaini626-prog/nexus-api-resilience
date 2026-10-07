@@ -1,11 +1,11 @@
 import { simulateOutage, simulateDegraded, restoreApi, getApiState, checkRateLimit, generateIncidentId } from "../../lib/state";
+import { getUserFromRequest } from "../../lib/auth";
 
 export async function POST(request) {
-  const adminSecret = request.headers.get("x-admin-secret");
-
-  if (!adminSecret || adminSecret !== process.env.ADMIN_ACTION_SECRET) {
+  const { user, error } = await getUserFromRequest(request);
+  if (!user) {
     return Response.json(
-      { error: "Unauthorized", incidentId: generateIncidentId() },
+      { error: error || "Unauthorized", incidentId: generateIncidentId() },
       { status: 401 }
     );
   }
@@ -36,11 +36,11 @@ export async function POST(request) {
 
     // Handle three actions: down, degraded, up
     if (action === "down") {
-      await simulateOutage(api);
+      await simulateOutage(user.id, api);
     } else if (action === "degraded") {
-      await simulateDegraded(api);
+      await simulateDegraded(user.id, api);
     } else if (action === "up") {
-      await restoreApi(api);
+      await restoreApi(user.id, api);
     } else {
       return Response.json(
         { error: "action must be 'down', 'degraded', or 'up'", incidentId: generateIncidentId() },
@@ -48,7 +48,7 @@ export async function POST(request) {
       );
     }
 
-    const state = await getApiState();
+    const state = await getApiState(user.id);
 
     return Response.json({
       success: true,

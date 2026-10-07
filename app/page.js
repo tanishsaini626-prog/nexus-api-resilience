@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "./lib/supabase";
 import LatencyChart from "./components/LatencyChart";
@@ -23,18 +23,19 @@ export default function Home() {
   const [rateLimitCount, setRateLimitCount] = useState(null);
   const [rateLimitReset, setRateLimitReset] = useState(0);
   const [optimizationMode, setOptimizationMode] = useState("OFF");
-  const [adminSecret, setAdminSecret] = useState(null);
 
-  const getAdminSecret = () => {
-    if (adminSecret) return adminSecret;
-    const entered = window.prompt("Enter staff password to perform this action:");
-    if (entered) setAdminSecret(entered);
-    return entered;
-  };
+  const getAuthHeaders = useCallback(async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    return {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${session?.access_token}`,
+    };
+  }, []);
 
-  const fetchHealth = async () => {
+  const fetchHealth = useCallback(async () => {
     try {
-      const response = await fetch("/api/health");
+      const headers = await getAuthHeaders();
+      const response = await fetch("/api/health", { headers });
       const result = await response.json();
       setData(result);
       setLoading(false);
@@ -90,25 +91,17 @@ export default function Home() {
       setHealthCheckError(true);
       setLoading(false);
     }
-  };
-
-
+  }, [getAuthHeaders]);
 
   const simulateApi = async (api, action) => {
-    const secret = getAdminSecret();
-    if (!secret) return;
-
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch("/api/simulate", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-admin-secret": secret,
-        },
+        headers,
         body: JSON.stringify({ api, action }),
       });
       if (response.status === 401) {
-        setAdminSecret(null);
         console.error("Simulate error:", "Unauthorized");
         return;
       }
@@ -178,7 +171,7 @@ export default function Home() {
       ignore = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [fetchHealth]);
 
   const statusCounts = data?.statusCounts || { healthy: 0, degraded: 0, down: 0 };
   const totalIncidents = events.filter((e) => e.status === "DOWN" || e.status === "DEGRADED" || e.status === "FAILOVER" || e.status === "FLAPPING").length;
@@ -347,9 +340,7 @@ export default function Home() {
           optimizationMode={optimizationMode}
           setOptimizationMode={setOptimizationMode}
           fetchHealth={fetchHealth}
-          adminSecret={adminSecret}
-          getAdminSecret={getAdminSecret}
-          setAdminSecret={setAdminSecret}
+          getAuthHeaders={getAuthHeaders}
         />
 
         {/* Test Router */}
@@ -372,6 +363,7 @@ export default function Home() {
             setEvents={setEvents}
             setFailoverFlash={setFailoverFlash}
             setLastRoutedTo={setLastRoutedTo}
+            getAuthHeaders={getAuthHeaders}
           />
         </div>
 

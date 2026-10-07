@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-export default function ChatPanel({ data, setEvents, setFailoverFlash, setLastRoutedTo }) {
+export default function ChatPanel({ data, setEvents, setFailoverFlash, setLastRoutedTo, getAuthHeaders }) {
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatHistory, setChatHistory] = useState([]);
@@ -19,9 +19,10 @@ export default function ChatPanel({ data, setEvents, setFailoverFlash, setLastRo
     setChatInput("");
 
     try {
+      const headers = getAuthHeaders ? await getAuthHeaders() : { "Content-Type": "application/json" };
       const response = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ message: userMsg }),
       });
       const result = await response.json();

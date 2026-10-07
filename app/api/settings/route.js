@@ -1,10 +1,11 @@
 import { setOptimizationMode, getOptimizationMode, checkRateLimit, generateIncidentId } from "../../lib/state";
+import { getUserFromRequest } from "../../lib/auth";
 
 export async function POST(request) {
-  const adminSecret = request.headers.get("x-admin-secret");
-  if (!adminSecret || adminSecret !== process.env.ADMIN_ACTION_SECRET) {
+  const { user, error } = await getUserFromRequest(request);
+  if (!user) {
     return Response.json(
-      { error: "Unauthorized", incidentId: generateIncidentId() },
+      { error: error || "Unauthorized", incidentId: generateIncidentId() },
       { status: 401 }
     );
   }
