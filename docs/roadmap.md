@@ -105,11 +105,14 @@ RedisJSON + transactions; the honest state is documented in the README's Limitat
 
 ## Phase 10 — Presentation (2–4h)
 
-- [ ] **Add a dashboard screenshot or GIF to the README** — the single biggest visual upgrade.
-      (Record a short screen capture of: kill a provider → watch retries/circuit/failover.)
-- [ ] Set the GitHub **repo description** and **topics**: `nextjs`, `redis`, `circuit-breaker`,
-      `resilience`, `supabase`, `byok`, `ai-gateway`, `upstash`.
-- [ ] Pin the repo on your GitHub profile.
+- [x] **Add a dashboard screenshot or GIF to the README** — done. `docs/assets/demo.gif` loops
+      kill → circuit opens → recovered, captured from the deployed app (no dev-tools badge), plus
+      a dashboard shot and a failover shot showing a real quota 429, the retry backoff, and the
+      reply still arriving via Anthropic.
+- [x] Set the GitHub **repo description**, **homepage** (the live demo URL) and **topics**:
+      `nextjs`, `redis`, `circuit-breaker`, `resilience`, `supabase`, `byok`, `ai-gateway`,
+      `upstash` — all set and read back from the API.
+- [ ] Pin the repo on your GitHub profile (web UI only — no API for profile pins).
 - [ ] Optional: custom domain on Vercel.
 
 ---
