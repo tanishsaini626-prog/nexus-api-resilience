@@ -29,7 +29,7 @@ export default function ApiKeyPanel({ getAuthHeaders }) {
           return;
         }
         const map = {};
-        for (const k of result.keys) map[k.provider] = k.maskedKey;
+        for (const k of result.keys) map[k.provider] = k.unreadable ? "UNREADABLE" : k.maskedKey;
         setKeys(map);
       } catch {
         if (!ignore) setLoadError("Failed to load keys");
@@ -127,7 +127,11 @@ export default function ApiKeyPanel({ getAuthHeaders }) {
           <div key={p.id}>
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-[10px] text-zinc-500">{p.label}</span>
-              {keys[p.id] ? (
+              {keys[p.id] === "UNREADABLE" ? (
+                <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20">
+                  UNREADABLE
+                </span>
+              ) : keys[p.id] ? (
                 <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                   REAL {keys[p.id]}
                 </span>

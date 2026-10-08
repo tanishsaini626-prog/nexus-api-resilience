@@ -1,5 +1,6 @@
 import { getUserFromRequest } from "../../lib/auth";
 import { createUserSupabaseClient, maskKey } from "../../lib/keys";
+import { encryptSecret, decryptSecret } from "../../lib/crypto";
 
 const VALID_PROVIDERS = ["openai", "anthropic", "gemini"];
 
@@ -20,10 +21,17 @@ export async function GET(request) {
     }
 
     return Response.json({
-      keys: data.map((row) => ({
-        provider: row.provider,
-        maskedKey: maskKey(row.api_key),
-      })),
+      keys: data.map((row) => {
+        try {
+          // Mask the real (decrypted) key so the tail shown is meaningful —
+          // masking the ciphertext would just display random base64.
+          return { provider: row.provider, maskedKey: maskKey(decryptSecret(row.api_key)) };
+        } catch {
+          // e.g. the encryption key was rotated: still tell the client a row
+          // exists so the user can delete or replace it.
+          return { provider: row.provider, unreadable: true };
+        }
+      }),
     });
   } catch (err) {
     return Response.json({ error: err.message }, { status: 500 });
@@ -51,10 +59,11 @@ export async function PUT(request) {
     }
 
     const supabase = createUserSupabaseClient(token);
+    const trimmedKey = apiKey.trim();
     const { error: dbError } = await supabase.from("provider_keys").upsert({
       user_id: user.id,
       provider,
-      api_key: apiKey,
+      api_key: encryptSecret(trimmedKey),
       updated_at: new Date().toISOString(),
     });
 
@@ -65,7 +74,7 @@ export async function PUT(request) {
     return Response.json({
       success: true,
       provider,
-      maskedKey: maskKey(apiKey),
+      maskedKey: maskKey(trimmedKey),
     });
   } catch (err) {
     return Response.json({ error: err.message }, { status: 500 });

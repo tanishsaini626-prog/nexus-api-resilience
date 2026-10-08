@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { decryptSecret } from "./crypto";
 
 // Per-request Supabase client that carries the caller's own JWT, so Postgres
 // RLS ("auth.uid() = user_id") enforces per-user key isolation. The shared
@@ -25,6 +26,7 @@ export function maskKey(apiKey) {
 // Returns { openai: "...", gemini: "..." } for the caller's own rows (RLS
 // scopes the query), {} when no keys are stored, or null if the DB lookup
 // itself failed — the caller falls back to simulation so chat keeps working.
+// Values are decrypted on the way out; legacy plaintext rows pass through.
 export async function getProviderKeys(token) {
   try {
     const supabase = createUserSupabaseClient(token);
@@ -33,7 +35,17 @@ export async function getProviderKeys(token) {
       .select("provider, api_key");
     if (error) return null;
     const map = {};
-    for (const row of data) map[row.provider] = row.api_key;
+    for (const row of data) {
+      try {
+        map[row.provider] = decryptSecret(row.api_key);
+      } catch (err) {
+        // One unreadable row (e.g. the encryption key was rotated) must not
+        // break the others — that provider just falls back to simulation.
+        console.error(
+          `provider_keys: cannot decrypt ${row.provider} key — was NEXUS_ENCRYPTION_KEY rotated? (${err.message})`
+        );
+      }
+    }
     return map;
   } catch {
     return null;

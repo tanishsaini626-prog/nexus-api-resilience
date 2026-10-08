@@ -104,6 +104,17 @@ authenticated user. The server builds a per-request Supabase client carrying the
 **there is no service-role master key anywhere in the app**, and the UI only ever receives masked
 tails (`••••abcd`).
 
+Keys are also **encrypted at rest** with AES-256-GCM (`app/lib/crypto.js`) before they reach the
+database, using a 32-byte `NEXUS_ENCRYPTION_KEY`. Each row gets a fresh random IV, and GCM's auth
+tag means a modified ciphertext fails to decrypt instead of returning garbage. Stored values carry
+an `enc:v1:` prefix, so rows written before encryption existed still read correctly and upgrade on
+their next save.
+
+> **Key-management tradeoff:** rotating or losing `NEXUS_ENCRYPTION_KEY` makes existing encrypted
+> rows unreadable — affected users must re-enter their provider keys. That is the point of
+> encryption, but it has to be said out loud. The variable is optional: without it, keys are stored
+> unencrypted with a startup warning, so local setups still work.
+
 > **The key design insight:** a real provider failure is just a failure. A `401` (bad key), `429`
 > (quota/rate limit), or `5xx` throws like any simulated error and flows through the *same* retry →
 > circuit-breaker → failover machinery. Adding real provider integrations required **zero changes**
@@ -198,12 +209,11 @@ See [`docs/study-guide.md`](docs/study-guide.md) for the full deep-dive.
 
 - Health checks ping providers' public endpoints (latency + status); they are not authenticated
   model calls.
-- Provider keys are protected by RLS but **stored unencrypted** — encryption at rest is planned.
+- Key management is deliberately minimal: one env var encrypts every stored provider key, with no
+  rotation tooling. Rotating it orphans existing rows (the UI flags them `UNREADABLE`).
 - Circuit-breaker and rate-limiter updates use read-modify-write Redis patterns with a documented
   small race window; a Lua script would make them atomic.
 - `debounce`, `flapping`, and `lastKnownHealth` are still process-global (not yet per-user).
-- The health poll makes ~10–12 Redis calls every 10s per open dashboard; batching them is the next
-  performance win.
 - OpenAI and Anthropic success paths are wired and error-verified, but only exercised with real
   keys once a funded key is available.
 
@@ -216,8 +226,8 @@ See [`docs/study-guide.md`](docs/study-guide.md) for the full deep-dive.
 - [x] Supabase auth + per-user data isolation
 - [x] BYOK real provider calls (OpenAI, Anthropic, Gemini) with simulation fallback
 - [x] Per-user rate limiting (sliding window + daily cap)
-- [ ] Batch the health-check Redis reads (~10 calls/poll → ~2)
-- [ ] Encrypt provider keys at rest (AES-256-GCM)
+- [x] Batch the health-check Redis reads (measured: 15 → 3 commands per poll, 80% fewer)
+- [x] Encrypt provider keys at rest (AES-256-GCM, versioned format, legacy rows still readable)
 - [ ] Atomic Redis operations (Lua) for breaker and limiter
 - [ ] Move remaining global guards (debounce, flapping) to per-user state
 

@@ -19,33 +19,40 @@ Estimated remaining effort: **~15–20 hours**, spread across a few sessions.
       present).
 - [ ] Remove the leftover `ADMIN_ACTION_SECRET` from **Vercel** → Project → Settings →
       Environment Variables (it's already gone from the repo).
+- [ ] Add **`NEXUS_ENCRYPTION_KEY`** to Vercel env vars (copy the value from `.env.local`) and
+      redeploy — this switches on key encryption in production (Phase 17b).
 
 ---
 
 ## Phase 17 — Production hardening (the real remaining engineering)
 
-### 17a. Batch the health-check Redis reads — ~1–2h ⭐ highest measurable win
+### 17a. Batch the health-check Redis reads — ✅ DONE (15 → 3 commands per poll, measured)
 
-**Problem:** every 10 seconds, each open dashboard makes ~10–12 Redis round-trips. A single open
-tab is on the order of thousands of commands per hour.
+**Problem:** every 10 seconds, each open dashboard made ~10–12 Redis round-trips.
 
-**Fix:** read `nexus:apiState:{userId}` **once** at the top of `/api/health`, compute all three
-provider results and the status/circuit summary in memory from that single read, then write once
-(via `redis.pipeline()` if separate writes are still needed). Target: ~10–12 calls → ~2–4.
+**Fix (shipped):** `applyHealthCheck()`, `computeStatusCounts()` and `computeCircuitBreakerSummary()`
+are now pure functions over an in-memory state object, plus a `saveApiState()` writer. `/api/health`
+reads state once, probes all three providers against that one object concurrently, and writes once.
+The old Redis-backed signatures remain as thin wrappers, so nothing else changed.
 
-**Why it matters:** it's a real, quotable number ("cut Redis usage ~80%") and it keeps the project
-comfortably inside free-tier limits.
+**Measured against real Upstash** with a counting proxy wrapped around the client: **15 → 3 commands
+per poll (80% fewer)**, verified by re-reading the persisted state. Bonus: the three concurrent
+per-provider read-modify-write cycles on one key are gone, removing a race that could lose updates.
 
-### 17b. Encrypt provider keys at rest — ~2–3h
+### 17b. Encrypt provider keys at rest — ✅ DONE (AES-256-GCM)
 
-**Problem:** keys are protected by RLS but stored as plaintext. A database dump would expose them.
+**Problem:** keys were protected by RLS but stored as plaintext. A database dump would expose them.
 
-**Fix:** AES-256-GCM via `node:crypto`, with a `KEY_ENCRYPTION_SECRET` env var. Encrypt in
-`PUT /api/keys`, decrypt in the chat route. Store with a version prefix (e.g. `enc:v1:...`) so
-existing plaintext rows still decrypt during a gradual migration.
+**Fix (shipped):** `app/lib/crypto.js` encrypts with AES-256-GCM and a fresh random IV per row
+(`enc:v1:` prefix). `PUT /api/keys` encrypts; `getProviderKeys()` decrypts. Rows without the prefix
+are legacy plaintext and pass through, so existing keys keep working. An unreadable row (rotated key)
+fails only itself — that provider drops to simulation and the dashboard shows `UNREADABLE`.
 
-**Tradeoff to document:** losing the secret means every stored key becomes unreadable — that's the
-point, but it needs to be said.
+**Tradeoff, documented in the README:** rotating or losing `NEXUS_ENCRYPTION_KEY` makes existing rows
+unreadable — that's the point of encryption, but it has to be said out loud.
+
+**Still to do on your side:** add `NEXUS_ENCRYPTION_KEY` to **Vercel** env vars (copy the line from
+`.env.local`) and redeploy — without it, production stores keys unencrypted with a warning.
 
 ### 17c. Move the last global guards to per-user state — ~1–2h
 
@@ -89,8 +96,9 @@ concurrency hazard and reason about the fix.
       - How do you isolate users? (namespaced keys + Postgres RLS, no service key)
       - What's the biggest bug you hit and how did you find it? (the masking `ReferenceError`)
       - What would break at 1000× scale? (races → Lua, batching, provider quotas, sharding)
-      - What's NOT production-ready yet? (key encryption, health checks, global guards — pick
-        honestly from the literature in the README)
+      - What's NOT production-ready yet? (health checks are unauthenticated pings, global guards
+        remain process-wide, no Lua atomicity, single env var for key encryption — pick honestly
+        from the Limitations list in the README)
 
 ---
 
@@ -111,5 +119,7 @@ concurrency hazard and reason about the fix.
 | Phases 12–13 | Supabase auth, per-user isolation (proven with two accounts) |
 | Phase 14 | BYOK: key storage + real OpenAI/Anthropic/Gemini calls + simulation fallback |
 | Phase 15 | Per-user rate limiting: 20/min sliding window + 200/day cap |
+| Phase 17a | Batched health poll: 15 → 3 Redis commands per poll (measured on real Upstash) |
+| Phase 17b | Provider keys encrypted at rest (AES-256-GCM, versioned format, legacy rows readable) |
 | Docs | README, `docs/study-guide.md`, `supabase/provider_keys.sql` |
-| Tests | 17 Vitest tests, plus a real-Redis integration verification of the limiter |
+| Tests | 29 Vitest tests, plus real-Redis integration verification of the limiter and the batching |
