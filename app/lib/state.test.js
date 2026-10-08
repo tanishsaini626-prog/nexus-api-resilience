@@ -38,6 +38,38 @@ vi.mock("./redis", () => ({
       fakeZsets[key] = fakeZset(key).filter((e) => e.score < min || e.score > max);
       return before - fakeZsets[key].length;
     }),
+    // The real checkRateLimit enforces the limit inside one Lua EVAL. This mock
+    // mirrors that script's semantics against the fake store (same marker
+    // dispatch, same ordering), so unit tests exercise the same contract; the
+    // actual Lua is verified against real Redis by an integration test.
+    eval: vi.fn(async (script, keys, args) => {
+      if (script.includes("NEXUS_RATE_LIMIT_V1")) {
+        const [minuteKey, dayKey] = keys;
+        const now = Number(args[0]);
+        const window = Number(args[1]);
+        const minuteLimit = Number(args[2]);
+        const dayLimit = Number(args[3]);
+        const member = args[5];
+
+        const entries = fakeZset(minuteKey);
+        const kept = entries.filter((e) => e.score < 0 || e.score > now - window);
+        fakeZsets[minuteKey] = kept;
+        const count = kept.length;
+        if (count >= minuteLimit) {
+          return JSON.stringify({ allowed: false, reason: "minute", remaining: 0, resetIn: window });
+        }
+
+        fakeStore[dayKey] = (Number(fakeStore[dayKey]) || 0) + 1;
+        const dayCount = fakeStore[dayKey];
+        if (dayCount > dayLimit) {
+          return JSON.stringify({ allowed: false, reason: "daily", remaining: 0, resetIn: Number(args[6]) });
+        }
+
+        kept.push({ score: now, member });
+        return JSON.stringify({ allowed: true, reason: "ok", remaining: minuteLimit - count - 1, resetIn: 0 });
+      }
+      throw new Error("state.test.js mock eval: unknown script — extend the mock for it");
+    }),
   },
 }));
 
@@ -494,6 +526,18 @@ describe("state.js - Per-User Rate Limiting", () => {
     expect(rejected.remaining).toBe(0);
     expect(rejected.reason).toBe("minute");
     expect(rejected.resetIn).toBeGreaterThan(0);
+  });
+
+  it("enforces the limit in ONE Redis command (atomic EVAL, Phase 17d)", async () => {
+    // The pre-Lua flow was 6 commands (zrem, zcard, incr, expire, zadd, expire)
+    // with a race window between them. One EVAL closes the race and, as a
+    // bonus, cuts the round-trips per chat request by 5.
+    const before = redis.eval.mock.calls.length;
+    const result = await checkRateLimit(RATE_USER);
+
+    expect(redis.eval.mock.calls.length).toBe(before + 1);
+    expect(result.allowed).toBe(true);
+    expect(result.remaining).toBe(19);
   });
 
   it("tracks users independently — one user's limit never affects another", async () => {

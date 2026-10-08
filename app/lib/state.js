@@ -373,19 +373,64 @@ export function checkFlapping(state, apiName, newStatus) {
 }
 
 // ============================================
-// PER-USER RATE LIMITING (Phase 15)
+// PER-USER RATE LIMITING (Phase 15; atomic via Lua since Phase 17d)
 // ============================================
 
 // Sliding window per user, stored in Redis so it works across route bundles
 // and serverless instances and survives restarts. Two windows:
 //   - per-minute: sorted set of request timestamps (true sliding window)
 //   - per-day: a counter with a TTL, keyed by UTC date
-// Same benign race as the state read-modify-write above: two simultaneous
-// requests from one user could both squeeze past a boundary. Acceptable at
-// this scale; a Lua script would make it atomic.
+//
+// The whole decision runs as ONE Lua EVAL. The original JS flow (zrem → zcard
+// → incr → zadd → expire, each a separate REST round-trip) raced under
+// concurrent requests: two requests could both count 19, both pass the check,
+// and both be admitted, letting a burst exceed the limit. EVAL runs
+// sequentially and isolated on the Redis side, so exactly RATE_LIMIT_PER_MINUTE
+// requests can pass per window no matter how many arrive at once.
 const RATE_LIMIT_PER_MINUTE = 20;
 const RATE_LIMIT_PER_DAY = 200;
 const MINUTE_WINDOW_MS = 60000;
+
+const RATE_LIMIT_SCRIPT = `-- NEXUS_RATE_LIMIT_V1
+-- KEYS[1] = minute sliding-window sorted set
+-- KEYS[2] = daily counter
+-- ARGV[1]=now(ms) [2]=window(ms) [3]=minuteLimit [4]=dayLimit [5]=dayTtl(s)
+-- ARGV[6]=unique member for this request [7]=ms until the daily cap resets
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local minuteLimit = tonumber(ARGV[3])
+local dayLimit = tonumber(ARGV[4])
+
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, now - window)
+local count = redis.call('ZCARD', KEYS[1])
+if count >= minuteLimit then
+  return cjson.encode({ allowed = false, reason = 'minute', remaining = 0, resetIn = window })
+end
+
+local dayCount = redis.call('INCR', KEYS[2])
+if dayCount == 1 then
+  redis.call('EXPIRE', KEYS[2], tonumber(ARGV[5]))
+end
+if dayCount > dayLimit then
+  return cjson.encode({ allowed = false, reason = 'daily', remaining = 0, resetIn = tonumber(ARGV[7]) })
+end
+
+redis.call('ZADD', KEYS[1], now, ARGV[6])
+redis.call('EXPIRE', KEYS[1], 120)
+return cjson.encode({ allowed = true, reason = 'ok', remaining = minuteLimit - count - 1, resetIn = 0 })
+`;
+
+// The EVAL result comes back as a JSON string (cjson.encode in the script);
+// newer clients may hand it over pre-parsed, so accept both.
+function parseEvalResult(result) {
+  if (typeof result === "string") return JSON.parse(result);
+  return result;
+}
+
+function dailyResetInMs(now) {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) - now;
+}
 
 function getRateLimitMinuteKey(userId) {
   return `nexus:rateLimit:minute:${userId}`;
@@ -397,39 +442,27 @@ function getRateLimitDayKey(userId) {
 
 export async function checkRateLimit(userId) {
   const now = Date.now();
-  const minuteKey = getRateLimitMinuteKey(userId);
-
-  // Drop timestamps that have aged out of the window, then count what remains.
-  await redis.zremrangebyscore(minuteKey, 0, now - MINUTE_WINDOW_MS);
-  const count = await redis.zcard(minuteKey);
-
-  if (count >= RATE_LIMIT_PER_MINUTE) {
-    return { allowed: false, remaining: 0, resetIn: MINUTE_WINDOW_MS, reason: "minute" };
-  }
-
-  // Daily cap: counter keyed by UTC date; TTL self-cleans it the next day.
-  const dayKey = getRateLimitDayKey(userId);
-  const dayCount = await redis.incr(dayKey);
-  if (dayCount === 1) {
-    await redis.expire(dayKey, 90000); // 25h
-  }
-  if (dayCount > RATE_LIMIT_PER_DAY) {
-    const tomorrowUtc = Date.UTC(
-      new Date(now).getUTCFullYear(),
-      new Date(now).getUTCMonth(),
-      new Date(now).getUTCDate() + 1
-    );
-    return { allowed: false, remaining: 0, resetIn: tomorrowUtc - now, reason: "daily" };
-  }
-
-  // Record this request in the sliding window.
-  await redis.zadd(minuteKey, {
-    score: now,
-    member: `${now}-${Math.random().toString(36).slice(2, 8)}`,
-  });
-  await redis.expire(minuteKey, 120); // 2x window — self-cleans when idle
-
-  return { allowed: true, remaining: RATE_LIMIT_PER_MINUTE - count - 1 };
+  const result = parseEvalResult(
+    await redis.eval(
+      RATE_LIMIT_SCRIPT,
+      [getRateLimitMinuteKey(userId), getRateLimitDayKey(userId)],
+      [
+        String(now),
+        String(MINUTE_WINDOW_MS),
+        String(RATE_LIMIT_PER_MINUTE),
+        String(RATE_LIMIT_PER_DAY),
+        String(90000), // 25h daily-counter TTL
+        `${now}-${Math.random().toString(36).slice(2, 8)}`,
+        String(dailyResetInMs(now)),
+      ]
+    )
+  );
+  return {
+    allowed: Boolean(result.allowed),
+    remaining: result.remaining,
+    resetIn: result.resetIn,
+    reason: result.reason,
+  };
 }
 
 // Last known health state (for crash recovery).
