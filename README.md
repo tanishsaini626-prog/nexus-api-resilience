@@ -141,7 +141,7 @@ their next save.
 git clone https://github.com/tanishsaini626-prog/nexus-api-resilience.git
 cd nexus-api-resilience
 npm install
-cp .env.example .env.local   # then fill in the four values below
+cp .env.example .env.local   # then fill in the five values below
 ```
 
 **Environment variables**
@@ -151,6 +151,14 @@ UPSTASH_REDIS_REST_URL=
 UPSTASH_REDIS_REST_TOKEN=
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
+NEXUS_ENCRYPTION_KEY=        # 32-byte key, 64 hex chars — see command below
+```
+
+Generate the encryption key (it encrypts stored provider keys; if it's missing, keys are stored
+unencrypted with a console warning, so local setups still run):
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
 **Database setup** — create the keys table + RLS policy by running
@@ -160,7 +168,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=
 
 ```bash
 npm run dev      # http://localhost:3000
-npm test         # Vitest (17 tests)
+npm test         # Vitest (34 tests)
 npm run lint
 npm run build
 ```
