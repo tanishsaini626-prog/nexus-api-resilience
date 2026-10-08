@@ -18,8 +18,8 @@ real provider calls.
 > Sign up, optionally add your own provider key, and watch the failover engine work. With no keys
 > configured, every provider runs in **simulation mode**, so the whole resilience demo is free.
 
-**Kill a provider → the circuit opens → traffic reroutes → it recovers on its own.** All three
-frames below are the deployed app:
+**Kill a provider → the circuit opens → traffic reroutes → it recovers on its own.** Every frame
+below is the deployed app (the loop repeats the outage frame so the cycle reads clearly):
 
 ![OpenAI killed, circuit opens, then recovers](docs/assets/demo.gif)
 
