@@ -16,10 +16,10 @@ quotas, slow responses. NEXUS sits in front of three providers as a gateway. It 
 per-provider health, retries with exponential backoff and jitter, trips a circuit breaker
 after repeated failures so it stops hammering a broken provider, and reroutes to the next
 healthy provider according to the selected strategy (cost or latency). State lives in Redis,
-so it survives restarts and is shared correctly across serverless instances; accounts and
-API keys live in Postgres behind row-level security, so every user's data is fully isolated.
-Users plug in their own provider keys, so the app makes real calls without the platform
-paying for usage."
+so it survives restarts and is shared correctly across serverless instances; accounts live in
+Postgres behind row-level security, so every user's data is fully isolated. Users plug in their
+own provider keys — encrypted at rest and readable only by them — so the app makes real calls
+without the platform paying for usage."
 
 ---
 
@@ -104,6 +104,7 @@ before falling through — the mode changes *order*, not the failure handling.
 
 - **Rate limit** — per-user, Redis-backed: 20 requests/min (sliding window of timestamps) plus
   a 200 requests/day cap (UTC-day counter). Chat only; other routes are auth-guarded but unlimited.
+  Enforced atomically inside one Lua `EVAL` — see §6.1.
 - **Debounce** — server-side 500ms minimum interval between chat sends (the client button
   disable is only a UX nicety, not real protection).
 - **Flapping detection** — 5 state transitions within 60s locks the provider's state for 2
@@ -118,8 +119,8 @@ before falling through — the mode changes *order*, not the failure handling.
 
 ### 4.1 Redis (Upstash) — fast shared state
 
-Circuit breaker state, routing mode, and (soon) rate limits live in Redis, not in process
-memory. Two reasons: it survives server restarts, and it is shared across serverless
+Circuit breaker state, routing mode, rate limits and the debounce window live in Redis, not in
+process memory. Two reasons: it survives server restarts, and it is shared across serverless
 instances.
 
 **THE lesson of the project:** module-level variables do NOT cross route bundles. In Next.js
@@ -185,7 +186,119 @@ Lesson: "pushed" ≠ "deployed" ≠ "live". Check the deploy status.
 
 ---
 
-## 6. War stories — bugs that taught the most
+## 6. Hardening — phases 15 and 17a–17d
+
+Sections 3.5 and 4 described what the guards *do*. This section is about making them hold up:
+under load, under concurrency, and against someone reading the database. Every item here came
+from asking "how do I actually know this works?" and then measuring it.
+
+### 6.1 Per-user rate limiting (Phase 15)
+
+- **Why:** BYOK means the platform pays nothing, but the *user's* provider quota is real and
+  finite. One runaway loop can burn a day of someone's free tier in a minute. The limit protects
+  the user from themselves, and the provider from you.
+- **Two windows, two mechanisms:**
+  - **20/minute** — a Redis sorted set holding one timestamp per request. Each check first drops
+    entries older than 60s (`ZREMRANGEBYSCORE`), then counts what's left (`ZCARD`). That's a true
+    rolling window.
+  - **200/day** — a counter keyed by the UTC date, with a 25-hour TTL so it cleans itself up.
+- **Why sliding and not fixed:** a fixed window that resets on the minute lets 40 requests
+  through around the boundary (20 at the end of one minute, 20 at the start of the next). A
+  rolling window can't be gamed that way.
+- **Keys are per user** (`nexus:rateLimit:minute:{userId}`), so limits are independent. Chat
+  only — the other routes are auth-guarded but unlimited, because they don't cost provider quota.
+
+### 6.2 The health poll, batched (Phase 17a)
+
+- **The situation:** the dashboard polls `/api/health` every 10 seconds, and each poll asked Redis
+  about 15 separate questions. Per provider it read the state, updated it (a read *and* a write),
+  then read it again; then each summary helper read the same state a third time.
+- **The fix:** split the logic into *pure functions over an in-memory object*
+  (`applyHealthCheck`, `computeStatusCounts`, `computeCircuitBreakerSummary`) plus a single writer
+  (`saveApiState`). The route now reads the state once, probes all three providers concurrently
+  against that one object, and writes it once.
+- **Measured against real Upstash**, by wrapping the client in a counting Proxy: **15 → 3 commands
+  per poll, 80% fewer.**
+- **Bonus fix:** the old shape ran three concurrent read-modify-write cycles on the same key, so
+  two providers updating at the same instant could overwrite each other's status. One read and one
+  write removed that whole class of bug.
+- **The generalisable idea:** separate computation from I/O. Pure functions can't be slow and
+  can't race; only the I/O boundary needs care.
+
+### 6.3 Encryption at rest (Phase 17b)
+
+- **The gap:** row-level security stops *other users* reading your rows. It does nothing about a
+  database dump, a backup, or anyone with dashboard access to the table. Keys were plaintext.
+- **The fix:** AES-256-GCM, applied before the row is written.
+  - GCM is *authenticated* encryption: it appends an auth tag, so tampered ciphertext fails to
+    decrypt instead of returning plausible garbage.
+  - A fresh random IV per encryption, so the same key encrypts differently every time. Identical
+    ciphertext would leak "these two users have the same key".
+  - Stored as `enc:v1:<base64(iv | tag | ciphertext)>`. The prefix versions the scheme, so a
+    future v2 can be read alongside v1.
+- **Migrating without downtime:** values *without* the prefix are legacy plaintext and pass
+  straight through, so existing rows keep working and upgrade whenever they're next saved.
+- **Failure modes, chosen deliberately:**
+  - No env var → store plaintext with a console warning, rather than fail every save. It's a
+    downgrade, but the app keeps working.
+  - A row that can't be decrypted (key rotated) fails **only itself**: that provider drops to
+    simulation and the dashboard shows `UNREADABLE`. It doesn't break the other providers or the
+    page.
+- **The tradeoff, documented rather than hidden:** one env var encrypts everything, and losing or
+  rotating it orphans existing rows. Real key management (rotation, a KMS) is a next step, not
+  something to pretend already exists.
+- **Verified on production, end to end:** a throwaway key came back out of Postgres as
+  `enc:v1:...` (99 characters vs 41 in plaintext), then the real Gemini key was re-saved and read
+  back through `GET /api/keys` to prove decryption works too, not just encryption.
+
+### 6.4 Per-user guards (Phase 17c)
+
+- **The bug class:** `flapping`, `debounce` and the crash-recovery cache were module-level, so on
+  a shared instance one user's traffic could affect another's.
+- **Three fixes, three different mechanisms, on purpose:**
+  - **flapping** → moved *inside* the per-user state object (`state[provider].flapping`). It is
+    per-user and per-provider at **zero extra Redis cost**, because the health poll already writes
+    that object.
+  - **debounce** → moved to Redis (`nexus:debounce:{userId}`, 60s TTL). The chat route doesn't
+    otherwise read state, and a cross-instance double-send is exactly what it guards against.
+  - **lastKnownHealth** → stayed in process memory, keyed by user, **because it exists for the
+    case where the health computation throws, including Redis being unreachable**. Storing it in
+    Redis would defeat its own purpose. Per-instance and best-effort is the correct trade-off.
+- **Interview point:** the same bug class, three correct answers. Being able to say *why* each one
+  differs is the signal — "move everything to Redis" would have been wrong for one of them.
+
+### 6.5 Atomicity with Lua (Phase 17d)
+
+- **The bug:** read-modify-write over a REST API is not atomic. The limiter was six sequential
+  commands (zrem, zcard, incr, expire, zadd, expire) with a gap between each. Fired 25 times
+  concurrently, every request counted the window before any of them wrote to it, and **25 of 25
+  were admitted**. The limit simply did not exist under parallel traffic.
+- **The fix:** the whole decision runs as one Lua `EVAL` — window cleanup, the count, both limit
+  checks, both writes and the TTLs all execute sequentially and isolated inside Redis. Same race
+  after the change: **exactly 20 admitted, 5 blocked with `reason: "minute"`**, and the stored
+  window holding exactly 20. The daily cap was re-verified through the script, and the endpoint
+  re-tested through the running app (429s from request 21, unchanged).
+- **Side benefit:** 6 Redis commands per chat request became 1.
+- **The scope call worth being able to defend:** the circuit breaker was deliberately *not*
+  Lua-ized. Its state is one JSON blob written from several JS paths (recording results,
+  simulating outages, the health poll, the admission gate), so making only the gate atomic
+  wouldn't compose — the other writers would still race with it. Its remaining races are also
+  self-healing: a duplicate `HALF_OPEN` probe or one extra counted failure changes no outcome.
+  Full atomicity means Lua for *every* writer, or RedisJSON with transactions. It's documented in
+  the README as a known, reasoned boundary rather than silently half-done.
+- **Testing, honestly:** a JavaScript mock cannot execute Lua. So the unit tests run the same
+  contract through a mock that mirrors the script's semantics (dispatched on the script's marker;
+  unknown scripts throw), and the *actual* Lua is verified against real Upstash by an integration
+  test. Knowing where your mocks stop being evidence is part of the skill.
+
+**What this phase changed about how the work gets done:** none of the five problems above were
+visible from reading the code. Each was found by asking "how do I know?", then measuring — a
+counting Proxy around the Redis client, a concurrent burst, a script that reads the row back out.
+That habit is the most transferable thing in this project.
+
+---
+
+## 7. War stories — bugs that taught the most
 
 1. **The masking ReferenceError (Day-10 bug, found by accident).** `clearTimeout(timeoutId)`
    in the `catch` block referenced a `const` declared inside the `try` block — invisible
@@ -228,34 +341,53 @@ Lesson: "pushed" ≠ "deployed" ≠ "live". Check the deploy status.
 
 ---
 
-## 7. Reference card
+## 8. Reference card
 
 **API routes**
 | Route | Method | Purpose |
 |---|---|---|
-| `/api/health` | GET | Parallel provider health checks + counts + circuit summary |
-| `/api/chat` | POST | Routed chat with retries/circuit/failover (sim or real per key) |
-| `/api/simulate` | POST | Force provider down / degraded / up / flapping demo |
+| `/api/health` | GET | Parallel provider health checks + counts + circuit summary (batched: 3 Redis commands) |
+| `/api/chat` | POST | Routed chat with rate limit → debounce → retries → circuit → failover (sim or real per key) |
+| `/api/simulate` | POST | Force provider down / degraded / up (the dashboard's Kill / Slow / Fix) |
 | `/api/settings` | POST | Set routing mode (OFF / COST / LATENCY) |
-| `/api/keys` | GET/PUT/DELETE | Manage the caller's own provider keys (masked tails only) |
-| `/api/{redis,supabase,auth}-test` | GET | Diagnostic routes — safe to delete (cleanup pending) |
+| `/api/keys` | GET/PUT/DELETE | Manage the caller's own provider keys (encrypted at rest, masked tails only) |
+
+**Redis keys** (everything is namespaced by user)
+| Key | Holds | TTL |
+|---|---|---|
+| `nexus:apiState:{userId}` | health + circuit + flapping state for all three providers, one JSON blob | none |
+| `nexus:optimizationMode:{userId}` | `OFF` / `COST` / `LATENCY` | none |
+| `nexus:rateLimit:minute:{userId}` | sorted set of request timestamps (sliding window) | 120s |
+| `nexus:rateLimit:day:{userId}:{YYYY-MM-DD}` | daily counter | 25h |
+| `nexus:debounce:{userId}` | timestamp of the last chat send | 60s |
 
 **Config numbers** — degraded >500ms; 3 failures → OPEN; 30s cooldown; retries 1s/2s/4s
-(cap 10s, ±20% jitter); 10s timeout/attempt; rate limit 20/min + 200/day per user (Redis);
-500ms debounce; flap lock 5/60s → 2min.
+(cap 10s, ±20% jitter); 10s timeout/attempt; rate limit 20/min + 200/day per user (Redis, one
+atomic `EVAL`); 500ms debounce; flap lock 5/60s → 2min; health poll every 10s.
 
-**Env vars** — `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`,
-`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`. (`ADMIN_ACTION_SECRET` is dead.)
+**Measured results worth quoting** — health poll 15 → 3 Redis commands (80% fewer); rate limiter
+25 of 25 concurrent requests admitted before Lua, exactly 20 after; encrypted key row 99 chars vs
+41 plaintext.
 
-**Commands** — `npm run dev` / `test` / `lint` / `build`. Tests: Vitest, 15 tests in
-`app/lib/state.test.js`, Redis mocked with an in-memory fake store.
+**Env vars** — `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `NEXT_PUBLIC_SUPABASE_URL`,
+`NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXUS_ENCRYPTION_KEY` (32 bytes / 64 hex chars, set for
+Production + Preview on Vercel). Without the encryption key the app still runs, storing keys
+unencrypted with a warning.
 
-**Gotchas** — PowerShell's `curl` is `Invoke-WebRequest` (use `Invoke-RestMethod`); zombie
-Node processes squat on port 3000; LF→CRLF git warnings are harmless.
+**Commands** — `npm run dev` / `test` / `lint` / `build`. 35 Vitest tests in
+`app/lib/state.test.js` (26) and `app/lib/crypto.test.js` (9), Redis mocked with an in-memory fake
+store. Two scripts: `scripts/rate-limit-test.mjs` (burst of 25 chat requests; accepts
+`NEXUS_LIVE_URL` to target production) and `scripts/verify-prod-encryption.mjs` (proves encryption
+is active on a deployed environment).
+
+**Gotchas** — PowerShell's `curl` is `Invoke-WebRequest` (use `Invoke-RestMethod`); zombie Node
+processes squat on port 3000; LF→CRLF git warnings are harmless; running `next build` and then
+`next dev` against the same `.next` folder can make every dynamic route 404 (fix: stop the server,
+delete `.next`, restart).
 
 ---
 
-## 8. Demo script (portfolio / interview)
+## 9. Demo script (portfolio / interview)
 
 1. **Dashboard tour** — health cards, circuit states, latency chart, event log, retry config.
 2. **Simulated outage** — Simulate → Kill OpenAI → watch events, failover, recovery.
@@ -265,27 +397,38 @@ Node processes squat on port 3000; LF→CRLF git warnings are harmless.
    *(Proves the gateway works against real internet failures with zero cost.)*
 5. **Flapping demo** — spam Kill/Fix → provider state locks, event log shows it.
 6. **Incident traceability** — trigger an error, take the INC id, `grep` it in the server log.
+7. **Rate limit proof** — run `scripts/rate-limit-test.mjs` and let them watch request 21 come
+   back `429 Rate limit exceeded (20 messages/minute)`.
+8. **Encryption proof** — open the Supabase table and show the `api_key` column: the stored value
+   starts with `enc:v1:` and is ciphertext, not a key. *(Row-level security hides other users'
+   rows from this same query — that's worth pointing out while the table is open.)*
 
 ---
 
-## 9. Roadmap & open items
+## 10. Roadmap & open items
 
-- ✅ Phases 1–9 (original roadmap; Phase 7 tests now pass), 12–14 (auth, isolation, BYOK+real calls).
-- ✅ **Phase 15 — per-user rate limits/quotas**: `checkRateLimit` is now Redis-backed and
-  per-user — 20/min sliding window + 200/day cap, scoped to chat. Remaining globals:
-  debounce, flapping, lastKnownHealth (revisit in a later phase).
-- ⬜ Phase 16 — billing (optional; BYOK makes it skippable).
-- ⬜ Phase 17 — production hardening: encrypt keys at rest, atomic Redis ops (Lua), batch
-  Redis reads (health endpoint does ~9 commands per poll — matters on free tier), remove
-  diagnostic routes.
-- ⬜ Phase 10 docs / 11 interview prep — deferred until the product stabilizes.
-- Open items: Gemini free-tier quota (new key in a NEW Google project, or wait for reset);
-  delete the fake keys from the dashboard when done demoing. (Cleanup done: dead admin secret
-  removed; diagnostic test routes deleted.)
+- ✅ **Phases 1–9** — stability, architecture, API, Redis state, security, frontend, tests, deploy.
+- ✅ **Phases 12–14** — Supabase auth, per-user isolation, BYOK with real provider calls.
+- ✅ **Phase 15** — per-user rate limiting: 20/min sliding window + 200/day cap.
+- ✅ **Phase 17a–17d** — production hardening: batched health poll (15 → 3 commands), keys
+  encrypted at rest, per-user guards (flapping, debounce, crash cache), atomic limiter via Lua.
+  See §6 for the full write-up.
+- ✅ **Phase 10** — presentation: README with a production demo GIF and screenshots, repo
+  description/homepage/topics, LinkedIn post.
+- ⬜ **Phase 11** — interview prep: the rehearsal week (numbers cold, flow from memory, war
+  stories out loud, demo script run twice). The checklist lives in `docs/roadmap.md`.
+- ⛔ **Phase 16 — billing: deliberately closed.** BYOK means the platform never pays for provider
+  usage, so there is nothing to bill. State that as a design decision, not an omission.
+- **Known boundaries, documented in the README rather than hidden:** circuit-breaker state updates
+  are still JS read-modify-write (deliberate, see §6.5); the crash-recovery cache is per-instance;
+  health checks are unauthenticated pings to public endpoints, not model calls; one env var
+  encrypts every stored key with no rotation tooling.
+- **Open items:** Gemini free-tier quota (create a key in a NEW Google project, or wait for the
+  daily reset); pin the repo on your GitHub profile.
 
 ---
 
-## 10. Glossary
+## 11. Glossary
 
 - **API gateway** — a single entry point in front of multiple backend services; routes,
   guards, and observes traffic.

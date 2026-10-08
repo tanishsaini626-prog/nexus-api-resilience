@@ -120,10 +120,12 @@ RedisJSON + transactions; the honest state is documented in the README's Limitat
 ## Phase 11 — Interview prep (3–5h, spread over a few sittings)
 
 - [ ] **Numbers cold:** 3 failures → OPEN; 30s cooldown; 3 retries at 1s/2s/4s (cap 10s, ±20%
-      jitter); 10s timeout; >500ms = DEGRADED; 20/min + 200/day per user.
+      jitter); 10s timeout; >500ms = DEGRADED; 20/min + 200/day per user; and the two measured
+      results: 15 → 3 Redis commands per health poll, and 25/25 concurrent admissions before Lua
+      → exactly 20 after.
 - [ ] **Draw the flow from memory:** client → JWT → guards → keys → routing order → per-provider
       retry/circuit → response. (60 seconds, on a whiteboard.)
-- [ ] **Rehearse the six war stories** (see `docs/study-guide.md` §6) — each as
+- [ ] **Rehearse the nine war stories** (see `docs/study-guide.md` §7) — each as
       *symptom → diagnosis → fix → lesson*.
 - [ ] **Prepare the likely questions:**
       - Why Redis instead of in-memory state? (serverless + restarts + shared state)
