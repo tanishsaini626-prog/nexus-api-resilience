@@ -11,6 +11,8 @@
 //
 // Usage (from the repo root, with `npm run dev` running):
 //   node --env-file=.env.local scripts/rate-limit-test.mjs <email> <password> [intervalMs=700]
+// Point it at production (or any other base URL) with NEXUS_LIVE_URL:
+//   NEXUS_LIVE_URL=https://nexus-api-resilience.vercel.app node --env-file=.env.local scripts/rate-limit-test.mjs <email> <password>
 
 const [, , email, password, intervalArg] = process.argv;
 if (!email || !password) {
@@ -21,7 +23,7 @@ const INTERVAL_MS = Number(intervalArg) || 700;
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const CHAT_URL = "http://localhost:3000/api/chat";
+const CHAT_URL = (process.env.NEXUS_LIVE_URL || "http://localhost:3000").replace(/\/+$/, "") + "/api/chat";
 
 const authRes = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
   method: "POST",

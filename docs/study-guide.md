@@ -208,6 +208,23 @@ Lesson: "pushed" ≠ "deployed" ≠ "live". Check the deploy status.
 6. **Free-tier quota (429).** After a day of heavy testing, Gemini's free quota ran out.
    The system treated it exactly like any provider failure: retries, circuit trip, failover,
    and a clear incident report. *Lesson: quotas are a failure mode; handle them like outages.*
+7. **The test that defeated itself (Phase 15 verification).** The rate-limit script paced
+   requests by *response* time — with a real provider key, each request took ~9s (quota 429s,
+   backoff, failover), so 25 "rapid" requests spread across 4 minutes and never put 20 inside
+   the 60-second window. The limiter looked broken while working perfectly. *Lesson: when a
+   test disagrees with the code, check the test's own assumptions first — pace by send time,
+   not response time.*
+8. **The limit that wasn't there (Phase 17d).** The limiter's six sequential Redis commands
+   raced: 25 concurrent requests all counted the window before any write landed, so **25 of 25
+   were admitted** — the limit simply didn't exist for parallel traffic. One Lua `EVAL` made
+   the whole check-and-update atomic: exactly 20 of 25 admitted. *Lesson: read-modify-write
+   over a REST API is not atomic, and "works when tested sequentially" says nothing about
+   concurrency.*
+9. **The env var that was never saved (Phase 17b production).** Three redeploys changed
+   nothing because `NEXUS_ENCRYPTION_KEY` had never actually been saved to the Vercel project.
+   `vercel env ls` revealed it in one command; a verification script that reads the raw DB row
+   proved what the UI couldn't. *Lesson: verify the artifact, not the intention — "I added it"
+   isn't true until something reads it back.*
 
 ---
 

@@ -13,10 +13,15 @@ real provider calls.
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
 ![Upstash Redis](https://img.shields.io/badge/Upstash-Redis-00E9A3?logo=redis&logoColor=white)
 ![Supabase](https://img.shields.io/badge/Supabase-Auth%20%2B%20Postgres-3ECF8E?logo=supabase&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-17%20passing-6E9F18?logo=vitest&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-35%20passing-6E9F18?logo=vitest&logoColor=white)
 
 > Sign up, optionally add your own provider key, and watch the failover engine work. With no keys
 > configured, every provider runs in **simulation mode**, so the whole resilience demo is free.
+
+**Kill a provider → the circuit opens → traffic reroutes → it recovers on its own.** All three
+frames below are the deployed app:
+
+![OpenAI killed, circuit opens, then recovers](docs/assets/demo.gif)
 
 ---
 
@@ -32,6 +37,12 @@ NEXUS sits in front of multiple providers and absorbs those failures:
 - Traffic is rerouted to the healthiest or cheapest provider according to the selected strategy.
 - When *everything* is down, the client gets a clear, traceable error (with an incident ID) —
   never a hang and never a fake success.
+
+Here it is handling a **real** failure — Gemini's free-tier quota running out mid-conversation. The
+retry log shows the backoff (846ms, then 2212ms), the circuit going `HALF_OPEN → OPEN` when the
+recovery probe also failed, and the reply still arriving via Anthropic:
+
+![Retry log and failover to Anthropic](docs/assets/demo-failover.png)
 
 ---
 
@@ -168,7 +179,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
 ```bash
 npm run dev      # http://localhost:3000
-npm test         # Vitest (34 tests)
+npm test         # Vitest (35 tests)
 npm run lint
 npm run build
 ```
