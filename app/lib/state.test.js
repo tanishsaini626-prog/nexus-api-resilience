@@ -51,7 +51,11 @@ import {
   getEffectiveStatus,
   getStatusCounts,
   getCircuitBreakerSummary,
+  applyHealthCheck,
+  computeStatusCounts,
+  computeCircuitBreakerSummary,
 } from "./state.js";
+import { redis } from "./redis";
 
 // ============================================================================
 // SECTION 1: Pure Synchronous Functions (Existing Suite)
@@ -439,5 +443,67 @@ describe("state.js - Per-User Rate Limiting", () => {
     expect(rejected.allowed).toBe(false);
     expect(rejected.reason).toBe("daily");
     expect(rejected.resetIn).toBeGreaterThan(0);
+  });
+});
+
+// ============================================================================
+// SECTION 4: Batched Health Helpers Are Pure (Phase 17a)
+// ============================================================================
+// The health poll now reads state once and writes once. For that to actually
+// cut Redis traffic, the helpers it reuses must operate purely on an in-memory
+// object and add ZERO Redis calls. These tests assert exactly that by watching
+// the mocked redis.get/redis.set call counts across each helper.
+describe("state.js - Batched health helpers are pure", () => {
+  function sampleState() {
+    return {
+      openai: { status: "DOWN", latency: 0, statusCode: null, circuitState: "OPEN", consecutiveFailures: 3, totalCircuitOpens: 1, simulatedDown: false, simulatedDegraded: false, lastStatusChange: null },
+      anthropic: { status: "DEGRADED", latency: 0, statusCode: null, circuitState: "CLOSED", consecutiveFailures: 1, totalCircuitOpens: 0, simulatedDown: false, simulatedDegraded: false, lastStatusChange: null },
+      gemini: { status: "HEALTHY", latency: 0, statusCode: null, circuitState: "CLOSED", consecutiveFailures: 0, totalCircuitOpens: 0, simulatedDown: false, simulatedDegraded: false, lastStatusChange: null },
+    };
+  }
+
+  it("computeStatusCounts tallies statuses without touching Redis", () => {
+    const gets = redis.get.mock.calls.length;
+    const sets = redis.set.mock.calls.length;
+
+    expect(computeStatusCounts(sampleState())).toEqual({ healthy: 1, degraded: 1, down: 1 });
+
+    expect(redis.get.mock.calls.length).toBe(gets);
+    expect(redis.set.mock.calls.length).toBe(sets);
+  });
+
+  it("computeCircuitBreakerSummary mirrors state without touching Redis", () => {
+    const gets = redis.get.mock.calls.length;
+    const sets = redis.set.mock.calls.length;
+
+    const summary = computeCircuitBreakerSummary(sampleState());
+    expect(summary.openai).toEqual({ state: "OPEN", failures: 3, threshold: 3, totalOpens: 1 });
+    expect(summary.gemini).toEqual({ state: "CLOSED", failures: 0, threshold: 3, totalOpens: 0 });
+    expect(summary.config).toEqual({ failureThreshold: 3, cooldownDuration: 30000 });
+
+    expect(redis.get.mock.calls.length).toBe(gets);
+    expect(redis.set.mock.calls.length).toBe(sets);
+  });
+
+  it("applyHealthCheck mutates the object in place, skips simulated providers, and never touches Redis", () => {
+    const gets = redis.get.mock.calls.length;
+    const sets = redis.set.mock.calls.length;
+
+    const state = sampleState();
+
+    // A fast, healthy probe records latency/status on gemini in place.
+    const changed = applyHealthCheck(state, "gemini", { latency: 42, statusCode: 200, wasError: false });
+    expect(changed).toBe(true);
+    expect(state.gemini.status).toBe("HEALTHY");
+    expect(state.gemini.latency).toBe(42);
+
+    // A simulated provider is left untouched and reports no change.
+    state.openai.simulatedDown = true;
+    const changedSim = applyHealthCheck(state, "openai", { latency: 10, statusCode: 200, wasError: false });
+    expect(changedSim).toBe(false);
+    expect(state.openai.status).toBe("DOWN");
+
+    expect(redis.get.mock.calls.length).toBe(gets);
+    expect(redis.set.mock.calls.length).toBe(sets);
   });
 });

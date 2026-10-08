@@ -56,6 +56,13 @@ export async function getApiState(userId) {
   return state || structuredClone(DEFAULT_API_STATE);
 }
 
+// Persist a state object the caller already holds in memory. This is what lets
+// the health poll read state once, mutate it for all three providers, and write
+// it back once — instead of every helper doing its own get/set round-trip.
+export async function saveApiState(userId, state) {
+  await redis.set(getApiStateKey(userId), state);
+}
+
 // Routing mode is stored in Redis PER USER (not in module memory): under
 // Turbopack dev each route bundle gets its own copy of this module, and in
 // production each API route is a separate serverless function — in both
@@ -89,10 +96,12 @@ function determineStatus(latency, statusCode, wasError) {
   return "HEALTHY";
 }
 
-export async function updateHealthCheck(userId, apiName, result) {
-  const state = await getApiState(userId);
+// Pure: apply one probe result to an in-memory state object. Returns true if it
+// changed anything, false when the provider is in a simulated state and must be
+// left alone. No Redis — the caller decides when to persist (see saveApiState).
+export function applyHealthCheck(state, apiName, result) {
   const api = state[apiName];
-  if (api.simulatedDown || api.simulatedDegraded) return;
+  if (api.simulatedDown || api.simulatedDegraded) return false;
 
   const newStatus = determineStatus(result.latency, result.statusCode, result.wasError);
   if (newStatus !== api.status) {
@@ -101,7 +110,16 @@ export async function updateHealthCheck(userId, apiName, result) {
   api.status = newStatus;
   api.latency = result.latency || 0;
   api.statusCode = result.statusCode;
-  await redis.set(getApiStateKey(userId), state);
+  return true;
+}
+
+// Redis-backed wrapper (unchanged signature) for callers that update a single
+// provider in isolation. The batched health poll uses applyHealthCheck directly.
+export async function updateHealthCheck(userId, apiName, result) {
+  const state = await getApiState(userId);
+  if (applyHealthCheck(state, apiName, result)) {
+    await redis.set(getApiStateKey(userId), state);
+  }
 }
 
 export async function simulateOutage(userId, api) {
@@ -207,8 +225,8 @@ export async function recordRequestResult(userId, apiName, success) {
   return { transitioned: false };
 }
 
-export async function getStatusCounts(userId) {
-  const state = await getApiState(userId);
+// Pure: tally statuses from an in-memory state object (no Redis).
+export function computeStatusCounts(state) {
   let healthy = 0, degraded = 0, down = 0;
   for (const api of ["openai", "anthropic", "gemini"]) {
     const s = state[api].status;
@@ -219,8 +237,13 @@ export async function getStatusCounts(userId) {
   return { healthy, degraded, down };
 }
 
-export async function getCircuitBreakerSummary(userId) {
+export async function getStatusCounts(userId) {
   const state = await getApiState(userId);
+  return computeStatusCounts(state);
+}
+
+// Pure: build the circuit-breaker summary from an in-memory state object.
+export function computeCircuitBreakerSummary(state) {
   return {
     openai: {
       state: state.openai.circuitState,
@@ -242,6 +265,11 @@ export async function getCircuitBreakerSummary(userId) {
     },
     config: { failureThreshold: 3, cooldownDuration: CIRCUIT_BREAKER_COOLDOWN_MS },
   };
+}
+
+export async function getCircuitBreakerSummary(userId) {
+  const state = await getApiState(userId);
+  return computeCircuitBreakerSummary(state);
 }
 // ============================================
 // RETRY CONFIG (Day 9)
