@@ -12,15 +12,14 @@ Estimated remaining effort: **~15–20 hours**, spread across a few sessions.
 
 - [ ] Verify rate limiting: with `npm run dev` running and no keys saved (SIM mode), run
       `node --env-file=.env.local scripts/rate-limit-test.mjs <email> <password>`
-      — expect requests #21+ to return `429 Rate limit exceeded`.
-- [ ] Create a **new Gemini key in a NEW Google project** (fresh free quota immediately), or wait
-      for the daily reset (~12:30 PM IST) and reuse the existing one.
-- [ ] Delete the fake OpenAI/Anthropic keys from the dashboard (they cost ~25s per message while
-      present).
-- [ ] Remove the leftover `ADMIN_ACTION_SECRET` from **Vercel** → Project → Settings →
-      Environment Variables (it's already gone from the repo).
-- [ ] Add **`NEXUS_ENCRYPTION_KEY`** to Vercel env vars (copy the value from `.env.local`) and
-      redeploy — this switches on key encryption in production (Phase 17b).
+      — expect requests #21+ to return `429 Rate limit exceeded`. (Not yet run.)
+- [ ] Optional: create a **new Gemini key in a NEW Google project** if the current one is still
+      hitting free-tier quota limits.
+- [x] Delete the fake OpenAI/Anthropic keys from the dashboard — done (only the real Gemini key
+      remains).
+- [x] Remove the leftover `ADMIN_ACTION_SECRET` from **Vercel** — done (Production + Preview).
+- [x] Add **`NEXUS_ENCRYPTION_KEY`** to Vercel and redeploy — done, and verified against the
+      deployed site (see 17b).
 
 ---
 
@@ -51,8 +50,15 @@ fails only itself — that provider drops to simulation and the dashboard shows 
 **Tradeoff, documented in the README:** rotating or losing `NEXUS_ENCRYPTION_KEY` makes existing rows
 unreadable — that's the point of encryption, but it has to be said out loud.
 
-**Still to do on your side:** add `NEXUS_ENCRYPTION_KEY` to **Vercel** env vars (copy the line from
-`.env.local`) and redeploy — without it, production stores keys unencrypted with a warning.
+**How it was verified (end to end, against production):** the live deployment was rebuilt with the
+variable set, a throwaway key was saved through the deployed site and read back out of Postgres as
+`enc:v1:` ciphertext, and the existing Gemini key was then re-saved through the app and read back
+via `GET /api/keys` — proving both encryption *and* decryption work on production with a real key.
+
+**One design note learned the hard way:** the variable had never actually been saved to the Vercel
+project (three redeploys changed nothing because there was nothing to pick up). `scripts/verify-prod-encryption.mjs`
+is the check that finally proved it, and the Vercel CLI (`vercel env ls`) is what revealed the truth
+in one command — worth reaching for before a fourth redeploy.
 
 ### 17c. Move the last global guards to per-user state — ✅ DONE
 
