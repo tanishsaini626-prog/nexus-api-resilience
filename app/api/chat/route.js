@@ -38,8 +38,8 @@ export async function POST(request) {
       }, { status: 429 });
     }
 
-    // EDGE CASE: Debounce check
-    const debounceCheck = shouldDebounce();
+    // EDGE CASE: Debounce check (per-user, Redis-backed)
+    const debounceCheck = await shouldDebounce(user.id);
     if (debounceCheck.shouldWait) {
       return Response.json({
         error: "Please slow down and wait a moment before sending another message",

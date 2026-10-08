@@ -213,7 +213,8 @@ See [`docs/study-guide.md`](docs/study-guide.md) for the full deep-dive.
   rotation tooling. Rotating it orphans existing rows (the UI flags them `UNREADABLE`).
 - Circuit-breaker and rate-limiter updates use read-modify-write Redis patterns with a documented
   small race window; a Lua script would make them atomic.
-- `debounce`, `flapping`, and `lastKnownHealth` are still process-global (not yet per-user).
+- The crash-recovery cache (`lastKnownHealth`) is per-instance and best-effort **by design** — it
+  exists for when Redis itself is unreachable, so persisting it in Redis would defeat its purpose.
 - OpenAI and Anthropic success paths are wired and error-verified, but only exercised with real
   keys once a funded key is available.
 
@@ -228,8 +229,8 @@ See [`docs/study-guide.md`](docs/study-guide.md) for the full deep-dive.
 - [x] Per-user rate limiting (sliding window + daily cap)
 - [x] Batch the health-check Redis reads (measured: 15 → 3 commands per poll, 80% fewer)
 - [x] Encrypt provider keys at rest (AES-256-GCM, versioned format, legacy rows still readable)
+- [x] Per-user guards — flapping, debounce, crash-recovery cache (no cross-user leakage)
 - [ ] Atomic Redis operations (Lua) for breaker and limiter
-- [ ] Move remaining global guards (debounce, flapping) to per-user state
 
 ---
 

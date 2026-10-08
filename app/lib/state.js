@@ -313,23 +313,31 @@ export function generateIncidentId() {
   return "INC-2025-" + String(id).padStart(4, "0");
 }
 
-// Flapping detection (rapid UP/DOWN transitions)
-const flappingState = {
-  openai: { transitions: 0, lastTransitionTime: null, locked: false, lockedUntil: null },
-  anthropic: { transitions: 0, lastTransitionTime: null, locked: false, lockedUntil: null },
-  gemini: { transitions: 0, lastTransitionTime: null, locked: false, lockedUntil: null },
-};
-
+// Flapping detection (rapid UP/DOWN transitions).
+//
+// The counter lives INSIDE each provider's entry in the per-user apiState
+// object: state[api].flapping. That makes it per-user and per-provider for
+// free — the health poll already reads and writes that object once — and it
+// survives restarts. Before Phase 17c this was a module-level global, which
+// meant one user's flapping could lock another user's status updates.
 const FLAPPING_CONFIG = {
   maxTransitions: 5,       // Max state changes in window
   windowMs: 60000,        // 1 minute window
   lockDurationMs: 120000,  // Lock state for 2 minutes if flapping
 };
 
-export function checkFlapping(apiName, oldStatus, newStatus) {
+// Pure w.r.t. Redis: mutates the flapping counter on the state object the
+// caller owns (which saveApiState persists). oldStatus comes from the state
+// itself, so callers can't disagree with it.
+export function checkFlapping(state, apiName, newStatus) {
+  const api = state[apiName];
+  const oldStatus = api.status;
   if (oldStatus === newStatus) return { isFlapping: false, locked: false };
 
-  const flapping = flappingState[apiName];
+  if (!api.flapping) {
+    api.flapping = { transitions: 0, lastTransitionTime: null, locked: false, lockedUntil: null };
+  }
+  const flapping = api.flapping;
   const now = Date.now();
 
   // If locked, don't change status
@@ -424,29 +432,47 @@ export async function checkRateLimit(userId) {
   return { allowed: true, remaining: RATE_LIMIT_PER_MINUTE - count - 1 };
 }
 
-// Last known health state (for crash recovery)
-let lastKnownHealth = null;
+// Last known health state (for crash recovery).
+//
+// Deliberately NOT stored in Redis: this cache exists for the case where the
+// health computation throws — which includes Redis itself being unreachable —
+// so persisting it there would defeat its purpose. It is a per-instance,
+// best-effort cache, so it's keyed by user: user A's fallback payload must
+// never be served in user B's response.
+const lastKnownHealthByUser = new Map();
 
-export function setLastKnownHealth(data) {
-  lastKnownHealth = { ...data, savedAt: new Date().toISOString() };
+export function setLastKnownHealth(userId, data) {
+  lastKnownHealthByUser.set(userId, { ...data, savedAt: new Date().toISOString() });
 }
 
-export function getLastKnownHealth() {
-  return lastKnownHealth;
+export function getLastKnownHealth(userId) {
+  return lastKnownHealthByUser.get(userId) || null;
 }
 
-// Debounce tracker
-const debounceState = { lastSendTime: 0, minInterval: 500 };
+// Debounce: reject a second message from the same user within 500ms.
+// Redis-backed and per-user (Phase 17c): the old module-level timestamp was
+// shared by every user on the instance, so one person's traffic could make
+// another person's message look like a double-send.
+const DEBOUNCE_MIN_INTERVAL_MS = 500;
 
-export function shouldDebounce() {
+function getDebounceKey(userId) {
+  return `nexus:debounce:${userId}`;
+}
+
+export async function shouldDebounce(userId) {
   const now = Date.now();
-  if (now - debounceState.lastSendTime < debounceState.minInterval) {
-    return { shouldWait: true, waitMs: debounceState.minInterval - (now - debounceState.lastSendTime) };
+  const lastSendTime = Number(await redis.get(getDebounceKey(userId))) || 0;
+  const elapsed = now - lastSendTime;
+
+  if (elapsed < DEBOUNCE_MIN_INTERVAL_MS) {
+    return { shouldWait: true, waitMs: DEBOUNCE_MIN_INTERVAL_MS - elapsed };
   }
-  debounceState.lastSendTime = now;
+
+  // TTL self-cleans the key once it can no longer affect anything.
+  await redis.set(getDebounceKey(userId), now, { ex: 60 });
   return { shouldWait: false, waitMs: 0 };
 }
 
-export function resetDebounce() {
-  debounceState.lastSendTime = 0;
+export async function resetDebounce(userId) {
+  await redis.del(getDebounceKey(userId));
 }

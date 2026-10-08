@@ -21,6 +21,12 @@ vi.mock("./redis", () => ({
       fakeStore[key] = (Number(fakeStore[key]) || 0) + 1;
       return fakeStore[key];
     }),
+    del: vi.fn(async (key) => {
+      const existed = key in fakeStore || key in fakeZsets;
+      delete fakeStore[key];
+      delete fakeZsets[key];
+      return existed ? 1 : 0;
+    }),
     expire: vi.fn(async () => 1),
     zadd: vi.fn(async (key, { score, member }) => {
       fakeZset(key).push({ score, member });
@@ -54,6 +60,8 @@ import {
   applyHealthCheck,
   computeStatusCounts,
   computeCircuitBreakerSummary,
+  setLastKnownHealth,
+  getLastKnownHealth,
 } from "./state.js";
 import { redis } from "./redis";
 
@@ -100,23 +108,28 @@ describe("state.js - Pure Synchronous Functions", () => {
   });
 
   // --------------------------------------------------------------------------
-  // checkFlapping(apiName, oldStatus, newStatus)
+  // checkFlapping(state, apiName, newStatus)
   // FLAPPING_CONFIG: maxTransitions: 5, windowMs: 60000, lockDurationMs: 120000
-  // Note: Uses module-level flappingState across calls within the test process.
+  // Pure: the counter lives on the per-user state object (state[api].flapping),
+  // not in a module global — that's what keeps users isolated (Phase 17c).
   // --------------------------------------------------------------------------
   describe("checkFlapping", () => {
-    it("does not trigger flapping when status is stable and unchanging", () => {
+    function stateWith(status) {
+      return { openai: { status }, anthropic: { status }, gemini: { status } };
+    }
+
+    it("does not trigger flapping when the probe agrees with the recorded status", () => {
       // Stable status returns immediately without modifying transition state
-      const result1 = checkFlapping("openai", "HEALTHY", "HEALTHY");
+      const result1 = checkFlapping(stateWith("HEALTHY"), "openai", "HEALTHY");
       expect(result1).toEqual({ isFlapping: false, locked: false });
 
-      const result2 = checkFlapping("anthropic", "DOWN", "DOWN");
+      const result2 = checkFlapping(stateWith("DOWN"), "anthropic", "DOWN");
       expect(result2).toEqual({ isFlapping: false, locked: false });
     });
 
     it("triggers isFlapping: true and locked: true after 5 rapid transitions", () => {
       // Threshold is maxTransitions: 5 within 60000ms window
-      // Using 'gemini' so its transition count starts clean at 0
+      const state = stateWith("HEALTHY");
       const transitions = [
         ["HEALTHY", "DOWN"], // transition 1
         ["DOWN", "HEALTHY"], // transition 2
@@ -125,51 +138,44 @@ describe("state.js - Pure Synchronous Functions", () => {
       ];
 
       for (const [oldStatus, newStatus] of transitions) {
-        const res = checkFlapping("gemini", oldStatus, newStatus);
+        state.gemini.status = oldStatus;
+        const res = checkFlapping(state, "gemini", newStatus);
         expect(res.isFlapping).toBe(false);
         expect(res.locked).toBe(false);
       }
 
       // 5th rapid transition reaches the threshold (maxTransitions = 5)
-      const res5 = checkFlapping("gemini", "HEALTHY", "DOWN");
+      state.gemini.status = "HEALTHY";
+      const res5 = checkFlapping(state, "gemini", "DOWN");
       expect(res5.isFlapping).toBe(true);
       expect(res5.locked).toBe(true);
 
       // Subsequent calls while locked return locked state
-      const resLocked = checkFlapping("gemini", "DOWN", "HEALTHY");
+      state.gemini.status = "DOWN";
+      const resLocked = checkFlapping(state, "gemini", "HEALTHY");
       expect(resLocked.isFlapping).toBe(true);
       expect(resLocked.locked).toBe(true);
     });
-  });
 
-  // --------------------------------------------------------------------------
-  // shouldDebounce() / resetDebounce()
-  // minInterval: 500ms
-  // Note: Uses module-level debounceState. Calling resetDebounce() resets lastSendTime.
-  // --------------------------------------------------------------------------
-  describe("shouldDebounce and resetDebounce", () => {
-    it("requires rapid succession calls to wait, and allows immediate call after resetDebounce", () => {
-      // Ensure clean state before testing
-      resetDebounce();
+    it("counts transitions per user and per provider (no cross-user leakage)", () => {
+      // User A's gemini flips five times and locks...
+      const userA = stateWith("HEALTHY");
+      for (let i = 0; i < 5; i++) {
+        userA.gemini.status = i % 2 === 0 ? "HEALTHY" : "DOWN";
+        checkFlapping(userA, "gemini", i % 2 === 0 ? "DOWN" : "HEALTHY");
+      }
+      expect(userA.gemini.flapping.locked).toBe(true);
 
-      // First call should not need to wait
-      const firstCall = shouldDebounce();
-      expect(firstCall.shouldWait).toBe(false);
-      expect(firstCall.waitMs).toBe(0);
+      // ...but that must not lock the same provider for another user (the bug
+      // this refactor fixed: the counter used to be a module-level global).
+      const userB = stateWith("HEALTHY");
+      const other = checkFlapping(userB, "gemini", "DOWN");
+      expect(other.isFlapping).toBe(false);
+      expect(other.locked).toBe(false);
 
-      // Second call immediately after should need to wait (< 500ms interval)
-      const secondCall = shouldDebounce();
-      expect(secondCall.shouldWait).toBe(true);
-      expect(secondCall.waitMs).toBeGreaterThan(0);
-      expect(secondCall.waitMs).toBeLessThanOrEqual(500);
-
-      // Calling resetDebounce clears the recorded timestamp
-      resetDebounce();
-
-      // Call immediately after reset should succeed without waiting
-      const afterResetCall = shouldDebounce();
-      expect(afterResetCall.shouldWait).toBe(false);
-      expect(afterResetCall.waitMs).toBe(0);
+      // Nor does it affect a different provider on the same state object.
+      const sameUserOtherProvider = checkFlapping(userA, "openai", "DOWN");
+      expect(sameUserOtherProvider.isFlapping).toBe(false);
     });
   });
 
@@ -390,6 +396,77 @@ describe("state.js - Redis-Dependent Circuit Breaker & State Functions", () => {
         failureThreshold: 3,
         cooldownDuration: 30000,
       },
+    });
+  });
+
+  // 9. shouldDebounce / resetDebounce — Redis-backed and per-user (Phase 17c)
+  describe("shouldDebounce and resetDebounce", () => {
+    it("requires rapid succession calls to wait, and allows an immediate call after resetDebounce", async () => {
+      await resetDebounce(USER_ID);
+
+      // First call should not need to wait
+      const firstCall = await shouldDebounce(USER_ID);
+      expect(firstCall.shouldWait).toBe(false);
+      expect(firstCall.waitMs).toBe(0);
+
+      // Second call immediately after should need to wait (< 500ms interval)
+      const secondCall = await shouldDebounce(USER_ID);
+      expect(secondCall.shouldWait).toBe(true);
+      expect(secondCall.waitMs).toBeGreaterThan(0);
+      expect(secondCall.waitMs).toBeLessThanOrEqual(500);
+
+      // resetDebounce clears the recorded timestamp
+      await resetDebounce(USER_ID);
+
+      const afterResetCall = await shouldDebounce(USER_ID);
+      expect(afterResetCall.shouldWait).toBe(false);
+      expect(afterResetCall.waitMs).toBe(0);
+    });
+
+    it("tracks users independently — one user's recent send never blocks another's", async () => {
+      // The old module-level timestamp was shared by every user on the instance,
+      // so a burst from one account could make another account look like it was
+      // double-sending. State now lives in Redis under a per-user key.
+      await shouldDebounce("user-a");
+
+      const blockedA = await shouldDebounce("user-a");
+      expect(blockedA.shouldWait).toBe(true);
+
+      const allowedB = await shouldDebounce("user-b");
+      expect(allowedB.shouldWait).toBe(false);
+      expect(allowedB.waitMs).toBe(0);
+    });
+
+    it("persists the last send time in Redis so it survives across instances", async () => {
+      await shouldDebounce(USER_ID);
+
+      // Simulate another instance/request cycle: the value must be readable
+      // from the shared store, not from module memory.
+      const stored = Number(fakeStore[`nexus:debounce:${USER_ID}`]);
+      expect(stored).toBeGreaterThan(0);
+      expect(Date.now() - stored).toBeLessThan(1000);
+    });
+  });
+
+  // 10. lastKnownHealth crash-recovery cache — per-user (Phase 17c)
+  describe("lastKnownHealth cache", () => {
+    it("never serves one user's cached payload in another user's response", () => {
+      // Health responses include per-user fields (optimizationMode, provider
+      // statuses), so the fallback cache must be keyed by user.
+      setLastKnownHealth("user-a", { marker: "A" });
+      setLastKnownHealth("user-b", { marker: "B" });
+
+      expect(getLastKnownHealth("user-a").marker).toBe("A");
+      expect(getLastKnownHealth("user-b").marker).toBe("B");
+      expect(getLastKnownHealth("user-c")).toBeNull();
+    });
+
+    it("stamps savedAt so a stale fallback is identifiable", () => {
+      setLastKnownHealth("user-d", { marker: "D" });
+
+      const cached = getLastKnownHealth("user-d");
+      expect(cached.savedAt).toBeTypeOf("string");
+      expect(Date.now() - Date.parse(cached.savedAt)).toBeLessThan(5000);
     });
   });
 });

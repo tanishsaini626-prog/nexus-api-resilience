@@ -22,7 +22,7 @@ async function probeProvider(state, name, url) {
     const latency = Date.now() - start;
 
     if (!api.simulatedDown && !api.simulatedDegraded) {
-      const flapResult = checkFlapping(name, api.status, "HEALTHY");
+      const flapResult = checkFlapping(state, name, "HEALTHY");
       flapping = flapResult.isFlapping;
       if (!flapResult.isFlapping) {
         applyHealthCheck(state, name, { latency, statusCode: res.status, wasError: false });
@@ -31,7 +31,7 @@ async function probeProvider(state, name, url) {
     return { status: state[name].status, latency, statusCode: res.status, flapping };
   } catch {
     if (!api.simulatedDown && !api.simulatedDegraded) {
-      const flapResult = checkFlapping(name, api.status, "DOWN");
+      const flapResult = checkFlapping(state, name, "DOWN");
       flapping = flapResult.isFlapping;
       if (!flapResult.isFlapping) {
         applyHealthCheck(state, name, { latency: null, statusCode: null, wasError: true });
@@ -76,14 +76,14 @@ export async function GET(request) {
     results.config = { degradedThreshold: getConfig().degradedThreshold + "ms" };
     results.circuitBreaker = computeCircuitBreakerSummary(state);
 
-    // Save for crash recovery
-    setLastKnownHealth(results);
+    // Save for crash recovery (per-user: never served to another account)
+    setLastKnownHealth(user.id, results);
 
     return Response.json(results);
 
   } catch (error) {
     // If EVERYTHING crashes, return last known good state
-    const lastKnown = getLastKnownHealth();
+    const lastKnown = getLastKnownHealth(user.id);
     if (lastKnown) {
       return Response.json({
         ...lastKnown,

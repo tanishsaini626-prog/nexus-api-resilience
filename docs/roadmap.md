@@ -54,11 +54,23 @@ unreadable — that's the point of encryption, but it has to be said out loud.
 **Still to do on your side:** add `NEXUS_ENCRYPTION_KEY` to **Vercel** env vars (copy the line from
 `.env.local`) and redeploy — without it, production stores keys unencrypted with a warning.
 
-### 17c. Move the last global guards to per-user state — ~1–2h
+### 17c. Move the last global guards to per-user state — ✅ DONE
 
-`debounce`, `flapping`, and `lastKnownHealth` are still module-level, so one user's traffic can
-affect another's. Same pattern as `optimizationMode`: Redis keys of the form
-`nexus:{feature}:{userId}`.
+`debounce`, `flapping`, and `lastKnownHealth` were module-level, so one user's traffic could affect
+another's. All three are now scoped per user — with three deliberately different mechanisms:
+
+- **`flapping`** moved *inside* the per-user `apiState` object (`state[api].flapping`), so it's
+  per-user and per-provider at **zero extra Redis cost** — the health poll already reads and writes
+  that object once. (This is how it should work: the counter is part of the state, not a side table.)
+- **`debounce`** moved to Redis (`nexus:debounce:{userId}`) with a 60s TTL, because the chat route
+  doesn't otherwise read state and a cross-instance double-send is exactly what it exists to stop.
+- **`lastKnownHealth`** stayed in module memory but is now **keyed by user** — and that's a design
+  decision, not an omission: the cache exists for when the health computation throws, *including
+  Redis being unreachable*, so storing it in Redis would defeat its purpose. Per-instance and
+  best-effort is the correct trade-off.
+
+**Verified:** the flapping counter persisting inside `apiState` and the debounce key's real
+number/TTL/per-user isolation were both confirmed against real Upstash, not just the mock.
 
 ### 17d. Atomic Redis operations with Lua — ~2–3h (advanced, optional)
 
