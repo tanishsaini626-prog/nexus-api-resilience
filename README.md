@@ -128,7 +128,7 @@ their next save.
 - **Tailwind CSS 4** — dark dashboard UI
 - **Recharts** — live latency chart
 - **Upstash Redis** — circuit breaker state, routing mode, rate limits (shared across serverless
-  instances and surviving restarts)
+  instances and surviving restarts; the limiter enforces atomically via a Lua `EVAL`)
 - **Supabase** — Auth (JWT) + Postgres with RLS (provider keys)
 - **Vitest** — unit tests with a mocked Redis
 - **Vercel** — deployment (auto-deploys from `main`)
@@ -208,6 +208,14 @@ All routes require `Authorization: Bearer <supabase access token>`.
   breaker, and failover paths against real infrastructure.
 - **Undiagnosable errors are a second bug.** The all-providers-failed path now logs every
   provider's exact error alongside the incident ID shown to the user.
+- **A test can defeat the thing it tests.** The rate-limit script originally paced requests by
+  *response* time — with a real provider taking ~9s per call, 25 requests spread across 4 minutes
+  and never put 20 inside the 60-second window, so the limiter "passed" silently untested. Pacing
+  by *send* time fixed the test, not the code.
+- **Read-modify-write over REST isn't atomic.** The rate limiter's six-command flow admitted
+  **25 of 25 concurrent requests** under a controlled race — the limit didn't exist for parallel
+  traffic. It now runs as a single Lua `EVAL` (`NEXUS_RATE_LIMIT_V1`), which admits exactly 20 no
+  matter how many arrive at once, and drops the request's Redis cost from 6 commands to 1.
 
 See [`docs/study-guide.md`](docs/study-guide.md) for the full deep-dive.
 
@@ -219,8 +227,11 @@ See [`docs/study-guide.md`](docs/study-guide.md) for the full deep-dive.
   model calls.
 - Key management is deliberately minimal: one env var encrypts every stored provider key, with no
   rotation tooling. Rotating it orphans existing rows (the UI flags them `UNREADABLE`).
-- Circuit-breaker and rate-limiter updates use read-modify-write Redis patterns with a documented
-  small race window; a Lua script would make them atomic.
+- The rate limiter is atomic (one Lua `EVAL`), but circuit-breaker state updates are still JS
+  read-modify-write — a deliberate call, not an oversight: the state blob is written from several
+  paths, so making only one path atomic doesn't compose, and the failure modes are self-healing (a
+  duplicate probe or an extra counted failure changes nothing). Full atomicity means Lua for every
+  writer, or RedisJSON + transactions.
 - The crash-recovery cache (`lastKnownHealth`) is per-instance and best-effort **by design** — it
   exists for when Redis itself is unreachable, so persisting it in Redis would defeat its purpose.
 - OpenAI and Anthropic success paths are wired and error-verified, but only exercised with real
@@ -238,7 +249,8 @@ See [`docs/study-guide.md`](docs/study-guide.md) for the full deep-dive.
 - [x] Batch the health-check Redis reads (measured: 15 → 3 commands per poll, 80% fewer)
 - [x] Encrypt provider keys at rest (AES-256-GCM, versioned format, legacy rows still readable)
 - [x] Per-user guards — flapping, debounce, crash-recovery cache (no cross-user leakage)
-- [ ] Atomic Redis operations (Lua) for breaker and limiter
+- [x] Atomic rate limiting via Lua EVAL — 25 concurrent requests: old flow admitted 25, Lua admits
+      exactly 20 (breaker left on documented read-modify-write; see Limitations)
 
 ---
 

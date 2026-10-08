@@ -10,9 +10,10 @@ Estimated remaining effort: **~15–20 hours**, spread across a few sessions.
 
 ## Step 0 — finish tonight's loose ends (~30 min)
 
-- [ ] Verify rate limiting: with `npm run dev` running and no keys saved (SIM mode), run
-      `node --env-file=.env.local scripts/rate-limit-test.mjs <email> <password>`
-      — expect requests #21+ to return `429 Rate limit exceeded`. (Not yet run.)
+- [x] Verify rate limiting — done, twice. First run exposed a flaw in the *test*: pacing by
+      response time let ~9s provider latency spread 25 requests over 4 minutes, never putting 20
+      inside the 60s window. The script now paces by send time (700ms apart); request #21+ then
+      returned `429 Rate limit exceeded (20 messages/minute)` exactly as designed.
 - [ ] Optional: create a **new Gemini key in a NEW Google project** if the current one is still
       hitting free-tier quota limits.
 - [x] Delete the fake OpenAI/Anthropic keys from the dashboard — done (only the real Gemini key
@@ -78,13 +79,27 @@ another's. All three are now scoped per user — with three deliberately differe
 **Verified:** the flapping counter persisting inside `apiState` and the debounce key's real
 number/TTL/per-user isolation were both confirmed against real Upstash, not just the mock.
 
-### 17d. Atomic Redis operations with Lua — ~2–3h (advanced, optional)
+### 17d. Atomic Redis operations with Lua — ✅ DONE for the rate limiter (breaker deliberately not Lua-ized)
 
-The circuit breaker and rate limiter use read-modify-write, which has a small race window under
-concurrent requests. A Lua script (`redis.eval`) makes check-and-update atomic.
+**The measured bug:** the limiter's JS flow was six sequential REST commands (zrem → zcard → incr →
+expire → zadd → expire). Fired 25 times concurrently against real Upstash, every request counted
+the window before any `zadd` landed: **25 of 25 admitted** — the limit didn't exist for parallel
+traffic.
 
-Worth doing mainly because it's excellent interview material — it shows you can identify a
-concurrency hazard and reason about the fix.
+**The fix (shipped):** `checkRateLimit` now runs as ONE Lua `EVAL` (`NEXUS_RATE_LIMIT_V1` in
+`app/lib/state.js`) — cleanup, both limit checks, both writes and the TTL in a single sequential,
+isolated execution. Same 25-request race after the change: **exactly 20 admitted, 5 blocked with
+`reason: "minute"`, stored window size 20.** Daily cap (200) re-verified through the script too.
+Bonus: each chat request's limiter cost dropped from 6 Redis commands to 1. Also verified
+end-to-end through the running app: `scripts/rate-limit-test.mjs` returns 429s from #21 exactly as
+before.
+
+**Why the circuit breaker was NOT Lua-ized — a scope call worth explaining in interviews:** the
+breaker's state is one JSON blob written from several JS paths (record result, simulate, health
+poll, admission gate). Making only the admission gate atomic doesn't compose — JS writers would
+still race with it — and its remaining races are self-healing: a duplicate HALF_OPEN probe or an
+extra counted failure changes the outcome nothing. Full atomicity means Lua for *every* writer or
+RedisJSON + transactions; the honest state is documented in the README's Limitations section.
 
 ---
 
@@ -114,9 +129,9 @@ concurrency hazard and reason about the fix.
       - How do you isolate users? (namespaced keys + Postgres RLS, no service key)
       - What's the biggest bug you hit and how did you find it? (the masking `ReferenceError`)
       - What would break at 1000× scale? (races → Lua, batching, provider quotas, sharding)
-      - What's NOT production-ready yet? (health checks are unauthenticated pings, global guards
-        remain process-wide, no Lua atomicity, single env var for key encryption — pick honestly
-        from the Limitations list in the README)
+      - What's NOT production-ready yet? (health checks are unauthenticated pings, breaker state
+        updates are still read-modify-write by design, single env var for key encryption — pick
+        honestly from the Limitations list in the README)
 
 ---
 
@@ -139,5 +154,7 @@ concurrency hazard and reason about the fix.
 | Phase 15 | Per-user rate limiting: 20/min sliding window + 200/day cap |
 | Phase 17a | Batched health poll: 15 → 3 Redis commands per poll (measured on real Upstash) |
 | Phase 17b | Provider keys encrypted at rest (AES-256-GCM, versioned format, legacy rows readable) |
+| Phase 17c | Per-user flapping, debounce, crash-recovery cache (verified on real Upstash) |
+| Phase 17d | Atomic rate limiter via Lua EVAL: 25/25 concurrent admitted → exactly 20 |
 | Docs | README, `docs/study-guide.md`, `supabase/provider_keys.sql` |
-| Tests | 29 Vitest tests, plus real-Redis integration verification of the limiter and the batching |
+| Tests | 35 Vitest tests, plus real-Redis integration verification of the limiter, batching, guards and Lua atomicity |
